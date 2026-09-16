@@ -912,8 +912,6 @@ def vault_structure() -> str:
     return json.dumps(tree, ensure_ascii=False, indent=2)
 
 
-# ---- entry point ------------------------------------------------------
-
 # ---- indexed search tools ----------------------------------------------
 
 
@@ -937,7 +935,7 @@ def search_query(
     search_notes call returned no results for a multi-word phrase.
 
     Returns {"query", "corrected" (did-you-mean, empty string if none),
-    "total", "results": [{path, title, score, tags, folder, typ, status, uid}]}."""
+    "total", "results": [{path, title, score, tags, folder, typ, status, uid}]}
 
     Side effects: none (read-only). Requires VAULT_INDEX enabled (default).
     """
