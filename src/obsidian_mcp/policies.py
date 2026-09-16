@@ -1,7 +1,7 @@
 """Vault write policies: write-log, raw immutability, locking, index upkeep.
 
-These hooks enforce vault conventions at the filesystem choke point (the Vault
-"class) so every client inherits them:
+These hooks enforce vault conventions at the filesystem choke point of the
+Vault class, so every client inherits them:
 
 - WRITE_LOG: append a JSON line to .vault-write-log.jsonl for every write op
 - RAW_IMMUTABLE: block update/delete on notes under raw/
