@@ -41,7 +41,7 @@ def _require_wiki_uid(rel_path: str, metadata: dict) -> None:
       policies.update_wiki_index, which never routes through create/append.
     - update() — body-only replacement, existing FM is preserved; caller is exempt.
     """
-    norm = rel_path.replace("\\\\", "/")
+    norm = rel_path.replace("\\", "/")
     if policies.classify_layer(norm) != "wiki":
         return
     if norm.startswith("wiki/log/"):
@@ -84,7 +84,7 @@ def _strip_code_blocks(content: str) -> str:
 def _extract_title(path: Path, content: str) -> str:
     """Title = first H1 in markdown (ignoring code blocks), else filename."""
     safe_content = _strip_code_blocks(content)
-    m = re.search(r"^#\\s+(.+)$", safe_content, re.MULTILINE)
+    m = re.search(r"^#\s+(.+)$", safe_content, re.MULTILINE)
     if m:
         return m.group(1).strip()
     return path.stem
@@ -93,7 +93,7 @@ def _extract_title(path: Path, content: str) -> str:
 def _extract_inline_tags(content: str) -> set[str]:
     """Extract inline #tags (not in code blocks, not in frontmatter)."""
     cleaned = _strip_code_blocks(content)
-    return {m.group(1).lower() for m in re.finditer(r"(?<!\\w)#([a-zA-Z][\\w/-]+)", cleaned)}
+    return {m.group(1).lower() for m in re.finditer(r"(?<!\w)#([a-zA-Z][\w/-]+)", cleaned)}
 
 
 def _extract_wikilinks(content: str) -> list[str]:
@@ -102,7 +102,7 @@ def _extract_wikilinks(content: str) -> list[str]:
     Returns deduplicated target strings preserving first-seen order.
     """
     cleaned = _strip_code_blocks(content)
-    pattern = re.compile(r"!?\\[\\[([^\\]|#]+)(?:#[^\\]|]*)?(?:\\|[^\\]]*)?\\]\\]")
+    pattern = re.compile(r"!?\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
     seen: set[str] = set()
     results: list[str] = []
     for match in re.finditer(pattern, cleaned):
@@ -466,7 +466,7 @@ class Vault:
 
         post = frontmatter.load(p)
         lines = post.content.splitlines()
-        heading_re = re.compile(r"^(#{1,6})\\s+" + re.escape(heading) + r"\\s*$", re.IGNORECASE)
+        heading_re = re.compile(r"^(#{1,6})\s+" + re.escape(heading) + r"\s*$", re.IGNORECASE)
         start_idx = None
         level = None
         for i, line in enumerate(lines):
@@ -479,7 +479,7 @@ class Vault:
             raise ValueError(f"Heading not found: {heading}")
 
         end_idx = len(lines)
-        next_heading_re = re.compile(r"^#{1,%d}\\s" % level)
+        next_heading_re = re.compile(r"^#{1,%d}\s" % level)
         for i in range(start_idx + 1, len(lines)):
             if next_heading_re.match(lines[i]):
                 end_idx = i
@@ -503,7 +503,7 @@ class Vault:
 
     def daily_note_path(self, date: str) -> Path:
         """Resolve the path for a daily note, validating the date format."""
-        if not re.fullmatch(r"^\\d{4}-\\d{2}-\\d{2}$", date):
+        if not re.fullmatch(r"^\d{4}-\d{2}-\d{2}$", date):
             raise ValueError(f"Invalid date format: {date}")
         datetime.date.fromisoformat(date)
         daily_dir = os.environ.get("OBSIDIAN_DAILY_DIR", "Daily")
@@ -544,7 +544,7 @@ class Vault:
         """Find notes linking to target via [[wikilinks]], including embeds."""
         escaped = re.escape(target_title)
         pattern = re.compile(
-            r"!?\\[\\[" + escaped + r"(?:#[^\\]|]*)?(?:\\|[^\\]]*)?\\]\\]",
+            r"!?\[\[" + escaped + r"(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]",
             re.IGNORECASE,
         )
         return [n for n in self.list_notes() if pattern.search(n.content)]
@@ -644,14 +644,14 @@ class Vault:
 
             todo_matches = [
                 match.group(0)
-                for match in re.finditer(r"\\bTODO\\b", note.content, re.IGNORECASE)
+                for match in re.finditer(r"\bTODO\b", note.content, re.IGNORECASE)
             ]
             if todo_matches:
                 todos.append({"path": note.path, "matches": todo_matches})
 
             fixme_matches = [
                 match.group(0)
-                for match in re.finditer(r"\\bFIXME\\b", note.content, re.IGNORECASE)
+                for match in re.finditer(r"\bFIXME\b", note.content, re.IGNORECASE)
             ]
             if fixme_matches:
                 fixmes.append({"path": note.path, "matches": fixme_matches})
