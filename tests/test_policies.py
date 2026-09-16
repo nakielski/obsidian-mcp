@@ -59,7 +59,7 @@ class TestWriteLog:
         vault.create("Notes/legacy2.md", "# L2")
         log = tmp_path / ".vault-write-log.jsonl"
         lines = log.read_text(encoding="utf-8").strip().splitlines()
-        assert [json.loads(l)["path"] for l in lines] == ["Notes/legacy1.md", "Notes/legacy2.md"]
+        assert [json.loads(line)["path"] for line in lines] == ["Notes/legacy1.md", "Notes/legacy2.md"]
 
     def test_opt_out_disables_log(self, vault, tmp_path, monkeypatch):
         monkeypatch.setenv("VAULT_WRITE_LOG", "0")
