@@ -1,7 +1,7 @@
 """Vault write policies: write-log, raw immutability, locking, index upkeep.
 
-These hooks enforce vault conventions at the filesystem choke point of the
-Vault class, so every client inherits them:
+These hooks enforce vault conventions at the filesystem choke point (the Vault
+class) so every client inherits them:
 
 - WRITE_LOG: append a JSON line to .vault-write-log.jsonl for every write op
 - RAW_IMMUTABLE: block update/delete on notes under raw/
@@ -17,6 +17,7 @@ link check (advisory warnings) and fail-closed for raw immutability and locks.
 from __future__ import annotations
 
 import datetime
+import fcntl
 import json
 import os
 import re
@@ -73,11 +74,12 @@ def log_write(
     Controlled by VAULT_WRITE_LOG (default on). Never raises: logging must not
     break a successful write.
 
-    Concurrency model: appends go to a per-actor shard file under
+    Concurrency model (since 0.8.0): appends go to a per-actor shard file under
     .vault-write-log.d/<actor>.jsonl (single-writer invariant). A Syncthing-
     synchronized vault cannot provide multi-writer append safety for ONE
     shared file: file-level sync replaces whole files, so concurrent appends
-    from two devices silently lose each other's lines. Shard files are
+    from two devices silently lose each other's lines (observed 2026-09-14:
+    career lost 4 lines to a concurrent windows writer). Shard files are
     append-only from a single process family and therefore conflict-free.
     The legacy .vault-write-log.jsonl remains untouched for external writers
     (e.g. a differently-managed Windows installation).
@@ -149,8 +151,14 @@ SYSTEM_PREFIX = "90 System/"
 
 
 def classify_layer(rel_path: str) -> str:
-    """Classify a vault-relative path into its layer: raw, wiki, system, or para."""
-    p = rel_path.replace("\\", "/").lstrip("/")
+    """Classify a vault-relative path into its layer: raw, wiki, system, or para.
+
+    Case-insensitive on the layer prefixes: on case-insensitive filesystems
+    (NTFS, default APFS) 'RAW/x.md' resolves to the same file as 'raw/x.md',
+    so a case-sensitive check would let 'RAW/...' bypass the raw-immutability
+    policy.
+    """
+    p = rel_path.replace("\\", "/").lstrip("/").casefold()
     if p.startswith(RAW_PREFIX):
         return "raw"
     if p.startswith("wiki/"):
@@ -279,34 +287,78 @@ def update_wiki_index(
     idx_path = vault_root / INDEX_FILE
     entry_path = rel_path.replace("\\", "/").lstrip("/")
     entry_path = entry_path[len("wiki/"):] if entry_path.startswith("wiki/") else entry_path
+    lock_path = idx_path.with_suffix(".json.lock")
     try:
-        data = {"pages": [], "total_pages": 0}
-        if idx_path.exists():
+        # B3: lock the whole read-modify-write cycle. Without the lock,
+        # concurrent writers read the same old state and the last writer
+        # silently drops the other's entry (observed: 887/900 entries lost
+        # in a 3-process race test). os.replace() alone does NOT prevent
+        # lost updates — it only prevents torn files.
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "w") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
             try:
-                data = json.loads(idx_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                data = {"pages": [], "total_pages": 0}
-        if not isinstance(data, dict) or not isinstance(data.get("pages"), list):
-            data = {"pages": [], "total_pages": 0}
-
-        pages = [p for p in data["pages"] if p.get("path") != entry_path]
-        if action != "archive":
-            pages.append({
-                "path": entry_path,
-                "title": title,
-                "type": note_type or "page",
-                "status": status or "active",
-                "uid": uid or "",
-            })
-        pages.sort(key=_index_sort_key)
-        data["pages"] = pages
-        data["total_pages"] = len(pages)
-        data["generated"] = datetime.datetime.now().isoformat(timespec="seconds")
-        idx_path.parent.mkdir(parents=True, exist_ok=True)
-        idx_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        return {"updated": True, "total_pages": len(pages)}
+                return _update_wiki_index_locked(
+                    idx_path, entry_path, title, note_type, status, uid, action
+                )
+            finally:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
     except OSError as e:
         return {"updated": False, "error": str(e)}
+
+
+def _update_wiki_index_locked(
+    idx_path: Path,
+    entry_path: str,
+    title: str,
+    note_type: str,
+    status: str,
+    uid: str | None,
+    action: str,
+) -> dict:
+    """Runs while holding the index lock — do not call directly."""
+    data = {"pages": [], "total_pages": 0}
+    if idx_path.exists():
+        try:
+            data = json.loads(idx_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            # A torn/corrupt index must NOT be silently reset to empty —
+            # the next write would then wipe every entry. Preserve a copy and
+            # start fresh, but keep the corrupt original for recovery.
+            try:
+                bak = idx_path.with_suffix(".json.corrupt")
+                os.replace(idx_path, bak)
+            except OSError:
+                pass
+            data = {"pages": [], "total_pages": 0}
+    if not isinstance(data, dict) or not isinstance(data.get("pages"), list):
+        # structurally invalid (but parseable) — same conservative treatment
+        data = {"pages": [], "total_pages": 0}
+
+    pages = [p for p in data["pages"] if p.get("path") != entry_path]
+    if action != "archive":
+        pages.append({
+            "path": entry_path,
+            "title": title,
+            "type": note_type or "page",
+            "status": status or "active",
+            "uid": uid or "",
+        })
+    pages.sort(key=_index_sort_key)
+    data["pages"] = pages
+    data["total_pages"] = len(pages)
+    data["generated"] = datetime.datetime.now().isoformat(timespec="seconds")
+    idx_path.parent.mkdir(parents=True, exist_ok=True)
+    # B3: atomic replace + flock — concurrent writers (multi-profile
+    # Obsidian plugins) otherwise lose each other's entries
+    # (observed: 887/900 lost in a 3-process race) or leave a torn file.
+    tmp = idx_path.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp, idx_path)
+    return {"updated": True, "total_pages": len(pages)}
 
 
 # ---- 6. link check ------------------------------------------------------

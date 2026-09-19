@@ -5,7 +5,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![MCP](https://img.shields.io/badge/MCP-1.0+-green.svg)](https://modelcontextprotocol.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests: 167](https://img.shields.io/badge/tests-167-brightgreen.svg)](#development)
+[![Tests: 331](https://img.shields.io/badge/tests-331-brightgreen.svg)](#development)
 
 ## Why?
 
@@ -38,7 +38,8 @@ via the Model Context Protocol.
 - Path traversal protection on all entry points (vault sandbox)
 - Tag extraction (frontmatter + inline tags)
 - Structured output schemas for every MCP tool (22/22)
-- Vault write policies: write log (.vault-write-log.jsonl), raw/ immutability,
+- Vault write policies: write log (per-actor shards in `.vault-write-log.d/`,
+  legacy `.vault-write-log.jsonl` as fallback/opt-out), raw/ immutability,
   agent lock (.vault-lock), wiki/index.json upkeep, link checking
 - archive_note: archive-instead-of-delete with backlink reporting
 - Incremental Whoosh full-text index (BM25, stemmed, field queries, fuzzy,
@@ -162,7 +163,7 @@ MCP Client  ←—MCP stdio—→  obsidian-mcp server  →  vault.py  →  Obsi
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/       # 167 tests, all passing
+pytest tests/       # 331 tests, all passing
 ```
 
 CI runs on Python 3.10, 3.11, and 3.12 with `pytest` + `ruff`.

@@ -1,12 +1,13 @@
 [project]
 name = "obsidian-mcp"
-version = "1.0.0"
+dynamic = ["version"]
 description = "MCP server exposing an Obsidian vault to LLM clients (Claude, Cursor, etc.)"
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.0.0,<2",
     "whoosh3>=3.49",
     "python-frontmatter>=1.1.0",
+    "regex>=2024.11.6",
 ]
 
 [project.scripts]
@@ -17,11 +18,14 @@ Homepage = "https://github.com/nakielski/obsidian-mcp"
 Repository = "https://github.com/nakielski/obsidian-mcp"
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pytest-asyncio>=0.23", "mypy>=1.0", "ruff>=0.4"]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/obsidian_mcp/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/obsidian_mcp"]

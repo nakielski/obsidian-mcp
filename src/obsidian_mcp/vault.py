@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime
 import os
 import re
+import threading
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -116,8 +117,59 @@ def _extract_wikilinks(content: str) -> list[str]:
     return results
 
 
+def _load_capped(p: Path):
+    """Enforce the note size cap on every frontmatter load.
+
+    load_note() already caps, but every RMW method parses via
+    frontmatter.load directly — a >2 MiB file sailed through those paths
+    unbounded.
+    """
+    if p.stat().st_size > _MAX_NOTE_BYTES:
+        raise ValueError(
+            f"Note exceeds the {_MAX_NOTE_BYTES // (1024 * 1024)} MiB size cap: "
+            f"{p.name} ({p.stat().st_size} bytes)"
+        )
+    return frontmatter.load(p)
+
+def _fence_flags(lines: list[str]) -> list[bool]:
+    """One O(n) pass — fence state per line.
+
+    Returns flags[i] = True when lines[i] is INSIDE a fenced code block.
+    Fences must start with <4 spaces of indentation (CommonMark); a ```
+    inside a 4-space indented code block is code, not a fence toggle.
+    """
+    flags = [False] * len(lines)
+    fence = None
+    for i, line in enumerate(lines):
+        stripped = line.lstrip(" \t")
+        indent = len(line) - len(stripped)
+        if fence is not None:
+            flags[i] = True
+            if indent < 4 and stripped.startswith(fence):
+                fence = None
+        elif indent < 4 and (stripped.startswith("```") or stripped.startswith("~~~")):
+            fence = stripped[:3]
+            # the opening fence line itself counts as inside
+            flags[i] = True
+    return flags
+
+
+# Cap note file size before parsing. This bounds the worst-case parse
+# cost per note (pathologically large files slow every list-based tool).
+# It is NOT a YAML alias-bomb guard: PyYAML aliases are shared references,
+# they do not expand during load (verified empirically).
+_MAX_NOTE_BYTES = 2 * 1024 * 1024  # 2 MiB
+
+
 def load_note(full_path: Path, vault_root: Path) -> Note:
     """Parse a .md file into a Note object."""
+    # S13: reject oversized notes before YAML/frontmatter parsing —
+    # bounds per-note parse cost (see _MAX_NOTE_BYTES note above).
+    if full_path.stat().st_size > _MAX_NOTE_BYTES:
+        raise ValueError(
+            f"Note exceeds the {_MAX_NOTE_BYTES // (1024 * 1024)} MiB size cap: "
+            f"{full_path.name} ({full_path.stat().st_size} bytes)"
+        )
     post = frontmatter.load(full_path)
     content = post.content
     rel = str(full_path.relative_to(vault_root))
@@ -153,37 +205,165 @@ class Vault:
             self._index = None
         return self._index
 
+    # Internal bookkeeping files never reachable via tools (deny-list).
+    # Component names, case-insensitive; '.'/'..' already rejected above.
+    # Checked on BOTH the input segments and the resolved path (F1: a
+    # symlink 'Inbox/link' -> '.vault-write-log.jsonl' resolves to the real
+    # file, so an input-only check is bypassable).
+    _DENY_COMPONENTS = frozenset(
+        {
+            ".vault-write-log.jsonl",  # legacy audit log (write path)
+            ".vault-write-log.d",      # per-actor audit shards
+            ".vault-lock",             # advisory lock file
+            ".obsidian-mcp-index",     # Whoosh index dir
+            ".obsidian",               # Obsidian app config dir (any depth)
+        }
+    )
+
+    def _deny_check_resolved(self, candidate: Path, original: str) -> None:
+        """F1: re-run the deny-list on the RESOLVED absolute path.
+
+        resolve() follows symlinks, so a link planted in an allowed folder
+        that points at a denied file must be caught here. Hardlinks cannot
+        be caught by name (same inode, different name) — that residual risk
+        requires filesystem access and is documented in DEPLOYMENT.md.
+        """
+        try:
+            parts = [s.casefold() for s in candidate.relative_to(self.root).parts]
+        except ValueError:
+            return  # outside the vault — containment check handles this
+        for banned in self._DENY_COMPONENTS:
+            if banned in parts:
+                raise PermissionError(
+                    f"Access denied: '{banned}' is an internal bookkeeping "
+                    "file of the vault server and not accessible via tools "
+                    f"({original})."
+                )
+
     def __init__(self, vault_root: str | Path):
         self.root = Path(vault_root).resolve()
         if not self.root.is_dir():
             raise FileNotFoundError(f"Vault root not found: {self.root}")
+        # Serializes read-modify-write cycles (append, patch_section,
+        # search_and_replace, set_frontmatter, add/remove_tags) within this
+        # process. NOTE: FastMCP 1.29.x runs sync tools INLINE on the event
+        # loop, so in-process parallelism is currently
+        # impossible — this lock is future-proofing for async/threaded
+        # dispatch and protects library consumers. Cross-process safety is
+        # handled by .vault-lock + the B3 index flock.
+        self._rw_lock = threading.RLock()
 
     # ---- helpers -----------------------------------------------------
 
-    def _resolve(self, rel_path: str) -> Path:
-        """Resolve a file path safely (no traversal escapes, no absolute)."""
-        rel_path = rel_path.strip()
-        if not rel_path:
+    def _resolve(self, rel_path: str) -> tuple[Path, str]:
+        """Resolve a file path safely and return (absolute_path, normalized_rel).
+
+        Security invariants:
+        - absolute paths rejected; '.'/'..' segments rejected BEFORE resolution
+          (prevents suffix-append escapes like 'Inbox/..' writing outside the vault)
+        - containment checked after resolve AND re-checked after suffix handling
+        - normalized_rel is derived from the resolved absolute path, never from
+          the raw input string, so layer policies classify the actual target
+          ('./raw/x.md', ' raw/x.md', 'raw//x.md' all normalize to 'raw/x.md')
+        """
+        raw = rel_path.strip()
+        if not raw:
             raise ValueError("Path must not be empty")
-        if Path(rel_path).is_absolute():
+        if Path(raw).is_absolute():
             raise PermissionError(f"Absolute paths not allowed: {rel_path}")
-        candidate = (self.root / rel_path).resolve()
+        norm_input = raw.replace("\\", "/")
+        # Split on '/' ourselves: PurePosixPath collapses '.' segments, so
+        # checking its parts would silently accept 'Inbox/.' (resolving to a
+        # root-level Inbox.md). Reject explicit '.'/'..' segments instead.
+        segments = [s for s in norm_input.split("/") if s]
+        if ".." in segments or "." in segments:
+            raise PermissionError(
+                f"'.' and '..' path segments are not allowed: {rel_path}. "
+                "Use a plain vault-relative path (e.g. 'Inbox/Note.md')."
+            )
+        # Deny-list: internal bookkeeping files are never tool-accessible.
+        # Component-based (not prefix-based) so nested paths cannot smuggle
+        # these names past the check ('Inbox/.obsidian/app.json' is blocked
+        # too). Casefolded for case-insensitive filesystem parity. The write
+        # log itself stays readable: its audit trail must be inspectable.
+        lowered = [s.casefold() for s in segments]
+        for banned in self._DENY_COMPONENTS:
+            if banned in lowered:
+                raise PermissionError(
+                    f"Access denied: '{banned}' is an internal bookkeeping "
+                    "file of the vault server and not accessible via tools "
+                    f"({rel_path})."
+                )
+        if lowered and lowered[0] == ".obsidian":
+            raise PermissionError(
+                f"Access denied: '.obsidian' is the Obsidian app config dir "
+                f"and not accessible via tools ({rel_path})."
+            )
+        candidate = (self.root / norm_input).resolve()
+        candidate = self._contained(candidate, rel_path)
+        self._deny_check_resolved(candidate, rel_path)
+        if not candidate.suffix:
+            candidate = candidate.with_suffix(".md")
+        candidate = self._contained(candidate, rel_path)
+        self._deny_check_resolved(candidate, rel_path)
+        # F4: wiki/index.json exactly (legit 'sources/index.json' stays usable)
+        rel_norm = str(candidate.relative_to(self.root)).replace("\\", "/")
+        # The wiki index family by exact path AND by prefix —
+        # 'wiki/index.json.lock/x.md' would create a DIRECTORY named like
+        # the lock file and permanently kill index updates.
+        lowered_rel = rel_norm.casefold()
+        if (
+            lowered_rel in {"wiki/index.json", "wiki/index.json.lock", "wiki/index.json.tmp"}
+            or lowered_rel.startswith("wiki/index.json.")
+        ):
+            raise PermissionError(
+                f"Access denied: '{rel_norm}' is derived bookkeeping "
+                f"and not accessible via tools ({rel_path})."
+            )
+        return candidate, rel_norm
+
+    def _is_daily_note(self, norm_rel: str) -> bool:
+        """True when the normalized path sits inside OBSIDIAN_DAILY_DIR."""
+        daily_dir = os.environ.get("OBSIDIAN_DAILY_DIR", "Daily").replace("\\", "/").strip("/")
+        if not daily_dir:
+            return False
+        return norm_rel.replace("\\", "/").casefold().startswith(daily_dir.casefold() + "/")
+
+    def _contained(self, candidate: Path, original: str) -> Path:
+        """Raise PermissionError unless candidate sits inside the vault root."""
         try:
             candidate.relative_to(self.root)
         except ValueError:
-            raise PermissionError(f"Path escapes vault root: {rel_path}")
-        if not candidate.suffix:
-            candidate = candidate.with_suffix(".md")
+            raise PermissionError(f"Path escapes vault root: {original}")
         return candidate
 
     def _resolve_folder(self, folder: str) -> Path:
-        """Resolve a folder path safely (no traversal escapes)."""
+        """Resolve a folder path safely (no traversal escapes, deny-list enforced)."""
         folder = folder.strip()
         if not folder:
             return self.root
         if Path(folder).is_absolute():
             raise PermissionError(f"Absolute folder paths not allowed: {folder}")
-        candidate = (self.root / folder).resolve()
+        norm = folder.replace("\\", "/")
+        segments = [s for s in norm.split("/") if s]
+        if ".." in segments or "." in segments:
+            raise PermissionError(
+                f"'.' and '..' path segments are not allowed: {folder}."
+            )
+        lowered = [s.casefold() for s in segments]
+        for banned in self._DENY_COMPONENTS:
+            if banned in lowered:
+                raise PermissionError(
+                    f"Access denied: '{banned}' is internal bookkeeping "
+                    f"and not accessible via tools ({folder})."
+                )
+        if lowered and lowered[0] == ".obsidian":
+            raise PermissionError(
+                f"Access denied: '.obsidian' is the Obsidian app config dir "
+                f"and not accessible via tools ({folder})."
+            )
+        candidate = (self.root / norm).resolve()
+        self._deny_check_resolved(candidate, folder)
         try:
             candidate.relative_to(self.root)
         except ValueError:
@@ -197,6 +377,21 @@ class Vault:
             return ".trash" in p.relative_to(vault_root).parts
         except ValueError:
             return True
+
+    def _is_hidden_internal(self, p: Path) -> bool:
+        """F2: exclude internal/bookkeeping paths from all listings.
+
+        rglob walks see everything on disk; without this filter .obsidian/
+        plugin docs and audit shards would leak into list_notes, search,
+        graph, health and the Whoosh index.
+        """
+        try:
+            parts = [s.casefold() for s in p.relative_to(self.root).parts]
+        except ValueError:
+            return True
+        if parts and parts[0] in {".obsidian", ".trash", ".vault-write-log.d", ".obsidian-mcp-index"}:
+            return True
+        return any(c in parts for c in (".vault-write-log.jsonl", ".vault-lock"))
 
     @staticmethod
     def _normalize_tags(tags) -> list[str]:
@@ -213,13 +408,13 @@ class Vault:
         return [
             str(p.relative_to(self.root))
             for p in sorted(base.rglob("*.md"))
-            if not self._is_in_trash(p, self.root)
+            if not self._is_in_trash(p, self.root) and not self._is_hidden_internal(p)
         ]
 
     # ---- full API ----------------------------------------------------
 
     def read(self, rel_path: str) -> Note:
-        p = self._resolve(rel_path)
+        p, _ = self._resolve(rel_path)
         if not p.exists():
             raise FileNotFoundError(f"Note not found: {rel_path}")
         if not p.is_file():
@@ -232,22 +427,36 @@ class Vault:
         for p in sorted(base.rglob("*.md")):
             if self._is_in_trash(p, self.root):
                 continue
+            if self._is_hidden_internal(p):
+                continue
             try:
                 results.append(load_note(p, self.root))
             except Exception:
                 continue
         return results
 
-    def search(self, query: str) -> list[Note]:
+    def search(self, query: str, limit: int = 100) -> list[Note]:
+        """Case-insensitive substring search over titles and bodies.
+
+        Bounded result set — an empty/broad query no longer returns the
+        entire vault (unbounded payload on large vaults).
+        """
+        if limit <= 0:
+            raise ValueError("limit must be positive")
         q = query.lower()
-        return [
-            n for n in self.list_notes()
-            if q in n.title.lower() or q in n.content.lower()
-        ]
+        if not q:
+            return []
+        out: list[Note] = []
+        for n in self.list_notes():
+            if q in n.title.lower() or q in n.content.lower():
+                out.append(n)
+                if len(out) >= limit:
+                    break
+        return out
 
     def create(self, rel_path: str, content: str, tags: list[str] | None = None) -> Note:
         policies.assert_no_foreign_lock(self.root)
-        p = self._resolve(rel_path)
+        p, norm = self._resolve(rel_path)
         if p.exists():
             raise FileExistsError(f"Note already exists: {rel_path}")
         # Parse FM before mkdir so a rejected create leaves no files or directories.
@@ -263,145 +472,174 @@ class Vault:
                 existing = [existing]
             merged = sorted({str(t).lower() for t in list(existing) + list(tags)})
             post["tags"] = merged
-        _require_wiki_uid(rel_path, dict(post.metadata))
+        _require_wiki_uid(norm, dict(post.metadata))
+        # Reject oversized content BEFORE writing — an orphan file that
+        # no tool can read back would otherwise be left on disk.
+        if len(frontmatter.dumps(post).encode("utf-8")) > _MAX_NOTE_BYTES:
+            raise ValueError(
+                f"Note exceeds the {_MAX_NOTE_BYTES // (1024 * 1024)} MiB size cap: {rel_path}"
+            )
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(frontmatter.dumps(post), encoding="utf-8")
         note = load_note(p, self.root)
-        self._after_write(rel_path, "create", note)
+        self._after_write(norm, "create", note)
         return note
 
     def update(self, rel_path: str, content: str) -> Note:
-        policies.assert_no_foreign_lock(self.root)
-        policies.assert_mutable(rel_path)
-        p = self._resolve(rel_path)
-        if not p.exists():
-            raise FileNotFoundError(f"Note not found: {rel_path}")
-        if not p.is_file():
-            raise ValueError(f"Not a file: {rel_path}")
-        post = frontmatter.load(p)
-        post.content = content
-        p.write_text(frontmatter.dumps(post), encoding="utf-8")
-        note = load_note(p, self.root)
-        self._after_write(rel_path, "modify", note)
-        return note
+        with self._rw_lock:
+            policies.assert_no_foreign_lock(self.root)
+            p, norm = self._resolve(rel_path)
+            policies.assert_mutable(norm)
+            if not p.exists():
+                raise FileNotFoundError(f"Note not found: {rel_path}")
+            if not p.is_file():
+                raise ValueError(f"Not a file: {rel_path}")
+            post = _load_capped(p)
+            post.content = content
+            # Cap BEFORE writing — writing first made the note
+            # permanently unreadable (load_note then always raises).
+            if len(frontmatter.dumps(post).encode("utf-8")) > _MAX_NOTE_BYTES:
+                raise ValueError(
+                    f"Note exceeds the {_MAX_NOTE_BYTES // (1024 * 1024)} MiB size cap: {rel_path}"
+                )
+            p.write_text(frontmatter.dumps(post), encoding="utf-8")
+            note = load_note(p, self.root)
+            self._after_write(norm, "modify", note)
+            return note
 
     def delete(self, rel_path: str) -> str:
         """Permanently delete a note. Returns the vault-relative path."""
         policies.assert_no_foreign_lock(self.root)
-        policies.assert_mutable(rel_path)
-        p = self._resolve(rel_path)
+        p, norm = self._resolve(rel_path)
+        policies.assert_mutable(norm)
         if not p.exists():
             raise FileNotFoundError(f"Note not found: {rel_path}")
         if not p.is_file():
             raise ValueError(f"Not a file: {rel_path}")
+        # S6: capture the uid before unlink — delete must log what it deletes
+        try:
+            deleted_note = load_note(p, self.root)
+        except Exception:
+            deleted_note = None
         p.unlink()
-        self._after_write(rel_path, "delete", None)
-        return str(p.relative_to(self.root))
+        self._after_write(norm, "delete", deleted_note)
+        return norm
 
     def append(self, rel_path: str, content: str) -> tuple[Note, bool]:
-        """Append content to an existing note, or create it if missing."""
-        policies.assert_no_foreign_lock(self.root)
-        p = self._resolve(rel_path)
-        created = False
-        if p.exists():
-            if not p.is_file():
-                raise ValueError(f"Not a file: {rel_path}")
-            post = frontmatter.load(p)
-            existing = post.content or ""
-            if existing:
-                post.content = existing.rstrip("\n") + "\n" + content
+        with self._rw_lock:
+            """Append content to an existing note, or create it if missing."""
+            policies.assert_no_foreign_lock(self.root)
+            p, norm = self._resolve(rel_path)
+            created = False
+            if p.exists():
+                if not p.is_file():
+                    raise ValueError(f"Not a file: {rel_path}")
+                # Daily notes are journaling: appending entries to an existing
+                # daily note must work even when OBSIDIAN_DAILY_DIR points into
+                # a policy-protected layer (e.g. 'raw/Daily'). Other raw/ notes
+                # stay immutable (S3).
+                if not self._is_daily_note(norm):
+                    policies.assert_mutable(norm)
+                post = _load_capped(p)
+                existing = post.content or ""
+                if existing:
+                    post.content = existing.rstrip("\n") + "\n" + content
+                else:
+                    post.content = content
+                p.write_text(frontmatter.dumps(post), encoding="utf-8")
             else:
-                post.content = content
-            p.write_text(frontmatter.dumps(post), encoding="utf-8")
-        else:
-            if content.lstrip().startswith("---"):
-                post = frontmatter.loads(content)
-            else:
-                post = frontmatter.Post(content)
-            _require_wiki_uid(rel_path, dict(post.metadata))
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(frontmatter.dumps(post), encoding="utf-8")
-            created = True
-        note = load_note(p, self.root)
-        self._after_write(rel_path, "create" if created else "modify", note)
-        return note, created
+                if content.lstrip().startswith("---"):
+                    post = frontmatter.loads(content)
+                else:
+                    post = frontmatter.Post(content)
+                _require_wiki_uid(norm, dict(post.metadata))
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(frontmatter.dumps(post), encoding="utf-8")
+                created = True
+            note = load_note(p, self.root)
+            self._after_write(norm, "create" if created else "modify", note)
+            return note, created
 
-    # ---- frontmatter management --------------------------------------
+        # ---- frontmatter management --------------------------------------
 
     def get_frontmatter(self, rel_path: str, key: str):
         """Return the value of a frontmatter key, or None if not set."""
-        p = self._resolve(rel_path)
+        p, _ = self._resolve(rel_path)
         if not p.exists():
             raise FileNotFoundError(f"Note not found: {rel_path}")
         if not p.is_file():
             raise ValueError(f"Not a file: {rel_path}")
-        post = frontmatter.load(p)
+        post = _load_capped(p)
         return _serialize_value(post.metadata.get(key))
 
     def set_frontmatter(self, rel_path: str, key: str, value) -> None:
-        """Set a frontmatter key while preserving body and other metadata."""
-        policies.assert_no_foreign_lock(self.root)
-        policies.assert_mutable(rel_path)
-        p = self._resolve(rel_path)
-        if not p.exists():
-            raise FileNotFoundError(f"Note not found: {rel_path}")
-        if not p.is_file():
-            raise ValueError(f"Not a file: {rel_path}")
-        post = frontmatter.load(p)
-        post[key] = value
-        p.write_text(frontmatter.dumps(post), encoding="utf-8")
-        self._after_write(rel_path, "modify", self.read(rel_path))
+        with self._rw_lock:
+            """Set a frontmatter key while preserving body and other metadata."""
+            policies.assert_no_foreign_lock(self.root)
+            p, norm = self._resolve(rel_path)
+            policies.assert_mutable(norm)
+            if not p.exists():
+                raise FileNotFoundError(f"Note not found: {rel_path}")
+            if not p.is_file():
+                raise ValueError(f"Not a file: {rel_path}")
+            post = _load_capped(p)
+            post[key] = value
+            p.write_text(frontmatter.dumps(post), encoding="utf-8")
+            self._after_write(norm, "modify", self.read(rel_path))
 
     def delete_frontmatter(self, rel_path: str, key: str) -> None:
-        """Delete a frontmatter key if present."""
-        policies.assert_no_foreign_lock(self.root)
-        policies.assert_mutable(rel_path)
-        p = self._resolve(rel_path)
-        if not p.exists():
-            raise FileNotFoundError(f"Note not found: {rel_path}")
-        if not p.is_file():
-            raise ValueError(f"Not a file: {rel_path}")
-        post = frontmatter.load(p)
-        if key in post.metadata:
-            del post.metadata[key]
-            p.write_text(frontmatter.dumps(post), encoding="utf-8")
-            self._after_write(rel_path, "modify", self.read(rel_path))
+        with self._rw_lock:
+            """Delete a frontmatter key if present."""
+            policies.assert_no_foreign_lock(self.root)
+            p, norm = self._resolve(rel_path)
+            policies.assert_mutable(norm)
+            if not p.exists():
+                raise FileNotFoundError(f"Note not found: {rel_path}")
+            if not p.is_file():
+                raise ValueError(f"Not a file: {rel_path}")
+            post = _load_capped(p)
+            if key in post.metadata:
+                del post.metadata[key]
+                p.write_text(frontmatter.dumps(post), encoding="utf-8")
+                self._after_write(norm, "modify", self.read(rel_path))
 
-    # ---- tag management ----------------------------------------------
+        # ---- tag management ----------------------------------------------
 
     def add_tags(self, rel_path: str, tags: list[str]) -> list[str]:
-        """Add tags to the frontmatter tags array (deduplicated, lowercase)."""
-        policies.assert_no_foreign_lock(self.root)
-        policies.assert_mutable(rel_path)
-        p = self._resolve(rel_path)
-        if not p.exists():
-            raise FileNotFoundError(f"Note not found: {rel_path}")
-        post = frontmatter.load(p)
-        current = self._normalize_tags(post.metadata.get("tags", []))
-        for t in tags:
-            tl = t.lower()
-            if tl not in current:
-                current.append(tl)
-        post.metadata["tags"] = current
-        p.write_text(frontmatter.dumps(post), encoding="utf-8")
-        self._after_write(rel_path, "modify", self.read(rel_path))
-        return current
+        with self._rw_lock:
+            """Add tags to the frontmatter tags array (deduplicated, lowercase)."""
+            policies.assert_no_foreign_lock(self.root)
+            p, norm = self._resolve(rel_path)
+            policies.assert_mutable(norm)
+            if not p.exists():
+                raise FileNotFoundError(f"Note not found: {rel_path}")
+            post = _load_capped(p)
+            current = self._normalize_tags(post.metadata.get("tags", []))
+            for t in tags:
+                tl = t.lower()
+                if tl not in current:
+                    current.append(tl)
+            post.metadata["tags"] = current
+            p.write_text(frontmatter.dumps(post), encoding="utf-8")
+            self._after_write(norm, "modify", self.read(rel_path))
+            return current
 
     def remove_tags(self, rel_path: str, tags: list[str]) -> list[str]:
-        """Remove tags from the frontmatter tags array case-insensitively."""
-        policies.assert_no_foreign_lock(self.root)
-        policies.assert_mutable(rel_path)
-        p = self._resolve(rel_path)
-        if not p.exists():
-            raise FileNotFoundError(f"Note not found: {rel_path}")
-        post = frontmatter.load(p)
-        current = self._normalize_tags(post.metadata.get("tags", []))
-        remove_set = {t.lower() for t in tags}
-        current = [t for t in current if t not in remove_set]
-        post.metadata["tags"] = current
-        p.write_text(frontmatter.dumps(post), encoding="utf-8")
-        self._after_write(rel_path, "modify", self.read(rel_path))
-        return current
+        with self._rw_lock:
+            """Remove tags from the frontmatter tags array case-insensitively."""
+            policies.assert_no_foreign_lock(self.root)
+            p, norm = self._resolve(rel_path)
+            policies.assert_mutable(norm)
+            if not p.exists():
+                raise FileNotFoundError(f"Note not found: {rel_path}")
+            post = _load_capped(p)
+            current = self._normalize_tags(post.metadata.get("tags", []))
+            remove_set = {t.lower() for t in tags}
+            current = [t for t in current if t not in remove_set]
+            post.metadata["tags"] = current
+            p.write_text(frontmatter.dumps(post), encoding="utf-8")
+            self._after_write(norm, "modify", self.read(rel_path))
+            return current
 
     def list_tags(self, rel_path: str) -> list[str]:
         """Return all tags (frontmatter + inline), deduplicated and sorted."""
@@ -418,7 +656,11 @@ class Vault:
         """
         layer = policies.classify_layer(rel_path)
         result: dict = {"layer": layer}
-        result["log"] = policies.log_write(self.root, rel_path, action, layer)
+        uid = ""
+        if note is not None:
+            meta = note.metadata if hasattr(note, "metadata") else {}
+            uid = str(meta.get("uid", "") or "")
+        result["log"] = policies.log_write(self.root, rel_path, action, layer, uid=uid)
         ix = self._init_index()
         if ix is not None:
             try:
@@ -453,53 +695,66 @@ class Vault:
     # ---- section patching --------------------------------------------
 
     def patch_section(self, rel_path: str, heading: str, action: str, content: str) -> Note:
-        """Surgically edit the content under a heading."""
-        if action not in {"append", "prepend", "replace"}:
-            raise ValueError(f"Invalid patch action: {action}")
-        policies.assert_no_foreign_lock(self.root)
-        policies.assert_mutable(rel_path)
-        p = self._resolve(rel_path)
-        if not p.exists():
-            raise FileNotFoundError(f"Note not found: {rel_path}")
-        if not p.is_file():
-            raise ValueError(f"Not a file: {rel_path}")
+        with self._rw_lock:
+            """Surgically edit the content under a heading."""
+            if action not in {"append", "prepend", "replace"}:
+                raise ValueError(f"Invalid patch action: {action}")
+            policies.assert_no_foreign_lock(self.root)
+            p, norm = self._resolve(rel_path)
+            policies.assert_mutable(norm)
+            if not p.exists():
+                raise FileNotFoundError(f"Note not found: {rel_path}")
+            if not p.is_file():
+                raise ValueError(f"Not a file: {rel_path}")
 
-        post = frontmatter.load(p)
-        lines = post.content.splitlines()
-        heading_re = re.compile(r"^(#{1,6})\s+" + re.escape(heading) + r"\s*$", re.IGNORECASE)
-        start_idx = None
-        level = None
-        for i, line in enumerate(lines):
-            m = heading_re.match(line)
-            if m:
-                start_idx = i
-                level = len(m.group(1))
-                break
-        if start_idx is None:
-            raise ValueError(f"Heading not found: {heading}")
+            post = _load_capped(p)
+            lines = post.content.splitlines()
+            heading_re = re.compile(r"^(#{1,6})\s+" + re.escape(heading) + r"\s*$", re.IGNORECASE)
 
-        end_idx = len(lines)
-        next_heading_re = re.compile(r"^#{1,%d}\s" % level)
-        for i in range(start_idx + 1, len(lines)):
-            if next_heading_re.match(lines[i]):
-                end_idx = i
-                break
+            # Precompute fence state per line in ONE O(n) pass. A naive
+            # per-line rescan is O(n^2) and can freeze a large-note patch.
+            # Fences are only fences with <4 spaces of indentation; a lone
+            # ``` inside a 4-space indented code block is indented CODE, not a
+            # fence toggle (CommonMark).
+            fence_flags = _fence_flags(lines)
 
-        new_lines = content.splitlines()
-        if action == "append":
-            updated = lines[:end_idx] + new_lines + lines[end_idx:]
-        elif action == "prepend":
-            updated = lines[:start_idx + 1] + new_lines + lines[start_idx + 1:]
-        else:
-            updated = lines[:start_idx + 1] + new_lines + lines[end_idx:]
+            start_idx = None
+            level = None
+            for i, line in enumerate(lines):
+                if fence_flags[i]:
+                    continue
+                m = heading_re.match(line)
+                if m:
+                    start_idx = i
+                    level = len(m.group(1))
+                    break
+            if start_idx is None:
+                raise ValueError(f"Heading not found: {heading}")
 
-        post.content = "\n".join(updated)
-        p.write_text(frontmatter.dumps(post), encoding="utf-8")
-        note = load_note(p, self.root)
-        self._after_write(rel_path, "modify", note)
-        return note
+            end_idx = len(lines)
+            next_heading_re = re.compile(r"^#{1,%d}\s" % level)
+            for i in range(start_idx + 1, len(lines)):
+                if fence_flags[i]:
+                    continue
+                if next_heading_re.match(lines[i]):
+                    end_idx = i
+                    break
 
-    # ---- daily notes -------------------------------------------------
+            new_lines = content.splitlines()
+            if action == "append":
+                updated = lines[:end_idx] + new_lines + lines[end_idx:]
+            elif action == "prepend":
+                updated = lines[:start_idx + 1] + new_lines + lines[start_idx + 1:]
+            else:
+                updated = lines[:start_idx + 1] + new_lines + lines[end_idx:]
+
+            post.content = "\n".join(updated)
+            p.write_text(frontmatter.dumps(post), encoding="utf-8")
+            note = load_note(p, self.root)
+            self._after_write(norm, "modify", note)
+            return note
+
+        # ---- daily notes -------------------------------------------------
 
     def daily_note_path(self, date: str) -> Path:
         """Resolve the path for a daily note, validating the date format."""
@@ -509,9 +764,47 @@ class Vault:
         daily_dir = os.environ.get("OBSIDIAN_DAILY_DIR", "Daily")
         if Path(daily_dir).is_absolute():
             raise PermissionError(f"Absolute daily dir not allowed: {daily_dir}")
-        return self._resolve(f"{daily_dir}/{date}.md")
+        return self._resolve(f"{daily_dir}/{date}.md")[0]
+
+    def archive(self, rel_path: str, archive_dir: str = "06 Archive") -> tuple[str, list[str]]:
+        """Move a note into the archive folder (the default removal action).
+
+        Public API — callers no longer orchestrate private helpers
+        (_resolve/_after_write) for archiving. Enforces lock + immutability
+        policies, keeps write log, Whoosh index and wiki/index.json in sync,
+        and reports backlinks so callers can update [[wikilinks]].
+
+        Returns (archive_target, backlink_paths).
+        """
+        with self._rw_lock:
+            policies.assert_no_foreign_lock(self.root)
+            note = self.read(rel_path)
+            incoming = [b.path for b in self.get_backlinks(note.title)]
+            target = policies.archive_target(rel_path, archive_dir)
+            src, norm = self._resolve(rel_path)
+            dst, _ = self._resolve(target)
+            policies.assert_mutable(norm)
+            if dst.exists():
+                raise FileExistsError(
+                    f"Archive target already exists: {target}. Rename the note or "
+                    "clear the archive target first."
+                )
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src.rename(dst)
+            self._after_write(norm, "archive", note)
+            policies.update_wiki_index(
+                self.root, norm, note.title, "", "", action="archive"
+            )
+            return target, incoming
 
     # ---- search and replace ------------------------------------------
+
+    # Max pattern length and max subject length for user-supplied regex
+    # (S2 ReDoS hardening). A pathological pattern on a large note could
+    # burn minutes of CPU inside re.subn; bounded inputs keep the worst
+    # case in the low milliseconds even for catastrophic backtracking.
+    _MAX_REGEX_LEN = 500
+    _MAX_NOTE_BYTES_FOR_SR = 2 * 1024 * 1024  # 2 MiB
 
     def search_and_replace(
         self,
@@ -522,23 +815,63 @@ class Vault:
         case_sensitive: bool = True,
     ) -> tuple[str, int]:
         """Replace occurrences of `find` in the note body."""
-        if not find:
-            raise ValueError("find must not be empty")
-        policies.assert_no_foreign_lock(self.root)
-        policies.assert_mutable(rel_path)
-        p = self._resolve(rel_path)
-        if not p.exists():
-            raise FileNotFoundError(f"Note not found: {rel_path}")
-        if not p.is_file():
-            raise ValueError(f"Not a file: {rel_path}")
-        post = frontmatter.load(p)
-        flags = 0 if case_sensitive else re.IGNORECASE
-        pattern = find if use_regex else re.escape(find)
-        new_content, count = re.subn(pattern, replace, post.content, flags=flags)
-        post.content = new_content
-        p.write_text(frontmatter.dumps(post), encoding="utf-8")
-        self._after_write(rel_path, "modify", None)
-        return new_content, count
+        with self._rw_lock:
+            if not find:
+                raise ValueError("find must not be empty")
+            if use_regex and len(find) > self._MAX_REGEX_LEN:
+                raise ValueError(
+                    f"Regex pattern too long (>{self._MAX_REGEX_LEN} chars); "
+                    "keep patterns small and specific."
+                )
+            policies.assert_no_foreign_lock(self.root)
+            p, norm = self._resolve(rel_path)
+            policies.assert_mutable(norm)
+            if not p.exists():
+                raise FileNotFoundError(f"Note not found: {rel_path}")
+            if not p.is_file():
+                raise ValueError(f"Not a file: {rel_path}")
+            post = _load_capped(p)
+            if len(post.content.encode("utf-8", errors="replace")) > self._MAX_NOTE_BYTES_FOR_SR:
+                raise ValueError(
+                    "Note too large for search/replace "
+                    f"(>{self._MAX_NOTE_BYTES_FOR_SR // (1024 * 1024)} MiB); "
+                    "split the note or edit it directly."
+                )
+            flags_re = 0 if case_sensitive else re.IGNORECASE
+            if use_regex:
+                # S2: user-supplied patterns get a real execution timeout via the
+                # `regex` module — catastrophic backtracking aborts after 2s
+                # instead of hanging the event loop for minutes.
+                import regex as _regex
+
+                try:
+                    new_content, count = _regex.subn(
+                        find,
+                        replace,
+                        post.content,
+                        flags=0 if case_sensitive else _regex.IGNORECASE,
+                        timeout=2.0,
+                    )
+                except _regex.error as exc:
+                    raise ValueError(f"Invalid regex pattern: {exc}") from exc
+                except TimeoutError as exc:
+                    # `regex` raises the BUILTIN TimeoutError (no regex.TimeoutError)
+                    raise ValueError(
+                        "Regex timed out after 2s; simplify the pattern "
+                        "(avoid nested quantifiers)."
+                    ) from exc
+            else:
+                # B4: literal mode must treat `replace` as plain text. A callable
+                # repl bypasses template processing entirely (no \1 group refs,
+                # no backslash escapes like 'C:\Users' crashing the call).
+                pattern = re.escape(find)
+                new_content, count = re.subn(
+                    pattern, lambda _m: replace, post.content, flags=flags_re
+                )
+            post.content = new_content
+            p.write_text(frontmatter.dumps(post), encoding="utf-8")
+            self._after_write(norm, "modify", load_note(p, self.root))
+            return new_content, count
 
     def get_backlinks(self, target_title: str) -> list[Note]:
         """Find notes linking to target via [[wikilinks]], including embeds."""
@@ -612,7 +945,7 @@ class Vault:
 
     def get_outlinks(self, rel_path: str) -> list[str]:
         """Return outgoing wikilink targets for a single note."""
-        p = self._resolve(rel_path)
+        p, _ = self._resolve(rel_path)
         if not p.exists():
             raise FileNotFoundError(f"Note not found: {rel_path}")
         if not p.is_file():

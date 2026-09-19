@@ -624,7 +624,7 @@ class TestOutputSchemas:
         schema = tool.outputSchema
         assert schema.get("type") == "array"
 
-    def test_differentiator_tools_registered(self, server_vault):
+    def test_new_rev6_tools_registered(self, server_vault):
         tools = _run_async(mcp.list_tools())
         names = {t.name for t in tools}
         assert names >= {"vault_graph", "find_orphans", "get_outlinks", "vault_health"}
@@ -815,8 +815,11 @@ class TestWikiUidValidation:
         assert not (tmp_path / "wiki" / "concepts" / "z.md").exists()
 
     def test_b8_wiki_index_json_exempt(self, vault, tmp_path):
-        vault.create("wiki/index.json", "{}")
-        assert (tmp_path / "wiki" / "index.json").exists()
+        """wiki/index.json is DENIED as a note target — it is derived
+        bookkeeping, writing it via tools corrupts the index (B3/B8)."""
+        with pytest.raises(PermissionError):
+            vault.create("wiki/index.json", "{}")
+        assert not (tmp_path / "wiki" / "index.json").exists()
 
 
 class TestServerWikiUidValidation:

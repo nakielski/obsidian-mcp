@@ -192,7 +192,7 @@ class TestWikiIndex:
         policies.update_wiki_index(
             tmp_path, "wiki/concepts/Gamma.md", "Gamma", "", "", action="archive"
         )
-        idx = json.loads((tmp_path / "wiki" / "index.json").read_text(encoding="utf-8"))
+        idx = json.loads((tmp_path / "wiki" / "index.json").read_text())
         assert all(p["path"] != "concepts/Gamma.md" for p in idx["pages"])
 
     def test_group_sort_order(self, tmp_path):
@@ -204,7 +204,7 @@ class TestWikiIndex:
             ("wiki/other/D.md", "D"),
         ]:
             policies.update_wiki_index(tmp_path, p, t, "", "")
-        idx = json.loads((tmp_path / "wiki" / "index.json").read_text(encoding="utf-8"))
+        idx = json.loads((tmp_path / "wiki" / "index.json").read_text())
         groups = [p["path"].split("/")[0] for p in idx["pages"]]
         assert groups.index("concepts") < groups.index("entities") < groups.index("sources") < groups.index("log")
 
