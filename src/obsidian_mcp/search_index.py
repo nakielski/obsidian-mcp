@@ -20,7 +20,7 @@ from __future__ import annotations
 import datetime
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 try:
     from whoosh import fields as w_fields
@@ -79,7 +79,8 @@ class VaultIndex:
     def _note_fields(self, note) -> dict:
         meta = getattr(note, "metadata", {}) or {}
         path = getattr(note, "path", "")
-        folder = str(Path(path).parent) if path and str(Path(path).parent) != "." else ""
+        parent = PurePosixPath(path.replace("\\", "/")).parent.as_posix() if path else "."
+        folder = parent if parent != "." else ""
         mtime = meta.get("updated") or meta.get("datum") or meta.get("date")
         if isinstance(mtime, str):
             m = re.match(r"(\d{4})-(\d{2})-(\d{2})", mtime)
@@ -113,7 +114,7 @@ class VaultIndex:
     def remove_note(self, rel_path: str) -> None:
         """Remove a note from the index by path."""
         writer = self._ix.writer(timeout=5.0)
-        writer.delete_by_term("path", rel_path)
+        writer.delete_by_term("path", rel_path.replace("\\", "/"))
         writer.commit()
 
     def rebuild(self, notes) -> dict:

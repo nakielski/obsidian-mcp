@@ -17,7 +17,6 @@ link check (advisory warnings) and fail-closed for raw immutability and locks.
 from __future__ import annotations
 
 import datetime
-import fcntl
 import json
 import os
 import re
@@ -27,6 +26,40 @@ try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows has no fcntl
     fcntl = None
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX has no msvcrt
+    msvcrt = None
+
+
+def _lock_exclusive(fh) -> None:
+    """Block until this process holds an exclusive lock on ``fh``.
+
+    POSIX uses ``fcntl.flock``. Windows has no fcntl, so it locks the first
+    byte via ``msvcrt.locking``; ``LK_LOCK`` gives up after ~10 s, so keep
+    retrying to match flock's blocking behaviour. Only cooperating writers
+    are serialized - which is exactly what the lock files are for.
+    """
+    if fcntl is not None:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    elif msvcrt is not None:  # pragma: no cover - Windows only
+        fh.seek(0)
+        while True:
+            try:
+                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                continue
+
+
+def _unlock(fh) -> None:
+    """Release a lock taken with :func:`_lock_exclusive`."""
+    if fcntl is not None:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    elif msvcrt is not None:  # pragma: no cover - Windows only
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
 
 WRITE_LOG_FILE = ".vault-write-log.jsonl"
 WRITE_LOG_SHARD_DIR = ".vault-write-log.d"
@@ -295,14 +328,14 @@ def update_wiki_index(
         # in a 3-process race test). os.replace() alone does NOT prevent
         # lost updates — it only prevents torn files.
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(lock_path, "w") as lock_fh:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        with open(lock_path, "a+") as lock_fh:
+            _lock_exclusive(lock_fh)
             try:
                 return _update_wiki_index_locked(
                     idx_path, entry_path, title, note_type, status, uid, action
                 )
             finally:
-                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+                _unlock(lock_fh)
     except OSError as e:
         return {"updated": False, "error": str(e)}
 

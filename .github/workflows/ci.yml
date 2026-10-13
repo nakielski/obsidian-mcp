@@ -8,9 +8,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
@@ -33,4 +35,19 @@ jobs:
         run: uv run ruff check src/ tests/
 
       - name: Run tests
-        run: uv run pytest -v
+        run: uv run pytest -v --junitxml=report.xml
+
+      - name: Report test failures as annotations
+        if: failure()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("report.xml").getroot()
+          s = root if root.tag == "testsuite" else root.find("testsuite")
+          print(f"::error title=SUMMARY::failures={s.get('failures')} errors={s.get('errors')} tests={s.get('tests')}")
+          for tc in root.iter("testcase"):
+              for f in tc.findall("failure") + tc.findall("error"):
+                  msg = ((f.get("message") or "") + " | " + (f.text or "")[-400:]).replace("\n", " ")[:900]
+                  print(f"::error title={tc.get('classname')}.{tc.get('name')}::{msg}")
+          PY
