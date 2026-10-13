@@ -10,7 +10,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.shared.exceptions import McpError
 from mcp.types import ErrorData
-from pydantic import BaseModel, Field, RootModel
+from pydantic import BaseModel, Field
 
 from . import __version__
 from .vault import Note, Vault
@@ -114,14 +114,16 @@ class SearchResultItem(BaseModel):
     title: str
     tags: list[str]
 
-class SearchNotesOutput(RootModel[list[SearchResultItem]]):
-    pass
+# MCP spec 2025-06-18: outputSchema MUST be an object schema (type: "object").
+# Array-returning tools therefore wrap their payload as {"results": [...]}.
+class SearchNotesOutput(BaseModel):
+    results: list[SearchResultItem]
 
-class ListNotesOutput(RootModel[list[SearchResultItem]]):
-    pass
+class ListNotesOutput(BaseModel):
+    results: list[SearchResultItem]
 
-class ListNotePathsOutput(RootModel[list[str]]):
-    pass
+class ListNotePathsOutput(BaseModel):
+    results: list[str]
 
 class CreateNoteOutput(BaseModel):
     created: str
@@ -172,8 +174,8 @@ class BacklinkItem(BaseModel):
     path: str
     title: str
 
-class GetBacklinksOutput(RootModel[list[BacklinkItem]]):
-    pass
+class GetBacklinksOutput(BaseModel):
+    results: list[BacklinkItem]
 
 class FrontmatterGetOutput(BaseModel):
     key: str
@@ -246,11 +248,11 @@ class OrphanItem(BaseModel):
     path: str
     title: str
 
-class FindOrphansOutput(RootModel[list[OrphanItem]]):
-    pass
+class FindOrphansOutput(BaseModel):
+    results: list[OrphanItem]
 
-class GetOutlinksOutput(RootModel[list[str]]):
-    pass
+class GetOutlinksOutput(BaseModel):
+    results: list[str]
 
 class HealthCheckItem(BaseModel):
     count: int
@@ -314,7 +316,7 @@ def search_notes(
     summary = [
         {"path": h.path, "title": h.title, "tags": h.tags} for h in hits
     ]
-    return SearchNotesOutput(summary)
+    return SearchNotesOutput(results=summary)
 
 
 @mcp.tool()
@@ -340,7 +342,7 @@ def list_notes(
     summary = [
         {"path": n.path, "title": n.title, "tags": n.tags} for n in notes
     ]
-    return ListNotesOutput(summary)
+    return ListNotesOutput(results=summary)
 
 
 @mcp.tool()
@@ -363,7 +365,7 @@ def list_note_paths(
         paths = _get_vault().list_note_paths(folder)
     except PermissionError as e:
         raise _to_mcp_error(e)
-    return ListNotePathsOutput(paths)
+    return ListNotePathsOutput(results=paths)
 
 
 @mcp.tool()
@@ -441,7 +443,7 @@ def get_backlinks(
     """
     hits = _get_vault().get_backlinks(title)
     summary = [{"path": h.path, "title": h.title} for h in hits]
-    return GetBacklinksOutput(summary)
+    return GetBacklinksOutput(results=summary)
 
 
 @mcp.tool()
@@ -785,7 +787,7 @@ def find_orphans() -> FindOrphansOutput:
     """
     try:
         orphans = _get_vault().find_orphans()
-        return FindOrphansOutput([{"path": n.path, "title": n.title} for n in orphans])
+        return FindOrphansOutput(results=[{"path": n.path, "title": n.title} for n in orphans])
     except Exception as e:
         raise _to_mcp_error(e)
 
@@ -808,7 +810,7 @@ def get_outlinks(
     """
     try:
         links = _get_vault().get_outlinks(path)
-        return GetOutlinksOutput(links)
+        return GetOutlinksOutput(results=links)
     except Exception as e:
         raise _to_mcp_error(e)
 
