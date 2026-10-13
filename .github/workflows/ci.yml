@@ -44,6 +44,8 @@ jobs:
           python - <<'PY'
           import xml.etree.ElementTree as ET
           root = ET.parse("report.xml").getroot()
+          s = root if root.tag == "testsuite" else root.find("testsuite")
+          print(f"::error title=SUMMARY::failures={s.get('failures')} errors={s.get('errors')} tests={s.get('tests')}")
           for tc in root.iter("testcase"):
               for f in tc.findall("failure") + tc.findall("error"):
                   msg = ((f.get("message") or "") + " | " + (f.text or "")[-400:]).replace("\n", " ")[:900]

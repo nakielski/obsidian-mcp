@@ -172,7 +172,7 @@ def load_note(full_path: Path, vault_root: Path) -> Note:
         )
     post = frontmatter.load(full_path)
     content = post.content
-    rel = str(full_path.relative_to(vault_root))
+    rel = full_path.relative_to(vault_root).as_posix()
     fm_tags = post.metadata.get("tags", [])
     if isinstance(fm_tags, str):
         fm_tags = [fm_tags]
@@ -406,7 +406,7 @@ class Vault:
         """Return relative note paths WITHOUT parsing file contents."""
         base = self._resolve_folder(folder)
         return [
-            str(p.relative_to(self.root))
+            p.relative_to(self.root).as_posix()
             for p in sorted(base.rglob("*.md"))
             if not self._is_in_trash(p, self.root) and not self._is_hidden_internal(p)
         ]

@@ -698,7 +698,7 @@ def daily_note(
     vault = _get_vault()
     try:
         p = vault.daily_note_path(date)
-        rel_path = str(p.relative_to(vault.root))
+        rel_path = p.relative_to(vault.root).as_posix()
         if action == "read":
             if p.exists():
                 n = vault.read(rel_path)
