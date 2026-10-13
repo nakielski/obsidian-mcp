@@ -5,6 +5,18 @@ All notable changes to **obsidian-mcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed (breaking for direct JSON consumers)
+- **MCP-spec-conform outputSchema**: `search_notes`, `list_notes`, `list_note_paths`,
+  `get_backlinks`, `find_orphans` and `get_outlinks` now return `{"results": [...]}`
+  instead of a bare list. The MCP spec requires `outputSchema.type == "object"`; strict
+  clients (e.g. Hermes) rejected the array schemas and parked the whole server.
+  LLM clients adapt automatically; scripts reading the structured output need `["results"]`.
+
+### Tests
+- `test_all_output_schemas_are_objects` guards against array-typed output schemas.
+
 ## [1.1.0] — 2026-09-19 — Security hardening
 
 ### Security

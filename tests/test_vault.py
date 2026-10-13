@@ -163,13 +163,13 @@ class TestServerTools:
         result = self._run_async(mcp.call_tool("list_notes", {}))
         text = result[0][0].text
         data = json.loads(text)
-        assert len(data) == 2
+        assert len(data["results"]) == 2
 
     def test_call_tool_search_notes_empty(self, server_vault):
         result = self._run_async(mcp.call_tool("search_notes", {"query": "zzznonexistent"}))
         text = result[0][0].text
         data = json.loads(text)
-        assert data == []
+        assert data["results"] == []
 
     def test_call_tool_create_note(self, server_vault):
         result = self._run_async(mcp.call_tool("create_note", {"path": "Inbox/created.md", "content": "# Created Note", "tags": ["test"]}))
@@ -185,7 +185,7 @@ class TestServerTools:
         result = self._run_async(mcp.call_tool("get_backlinks", {"title": "Second Brain Agent"}))
         text = result[0][0].text
         data = json.loads(text)
-        assert len(data) == 1
+        assert len(data["results"]) == 1
 
 
 class TestServerResources:
@@ -618,11 +618,18 @@ class TestOutputSchemas:
         assert schema["type"] == "object"
         assert set(schema["properties"].keys()) == {"path", "title", "tags", "metadata", "content"}
 
-    def test_search_notes_output_schema_is_array(self, server_vault):
+    def test_search_notes_output_schema_wraps_results(self, server_vault):
         tools = _run_async(mcp.list_tools())
         tool = next(t for t in tools if t.name == "search_notes")
         schema = tool.outputSchema
-        assert schema.get("type") == "array"
+        assert schema["type"] == "object"
+        assert schema["properties"]["results"]["type"] == "array"
+
+    def test_all_output_schemas_are_objects(self, server_vault):
+        # MCP spec: outputSchema.type MUST be "object"; strict clients reject anything else.
+        tools = _run_async(mcp.list_tools())
+        non_object = [t.name for t in tools if t.outputSchema and t.outputSchema.get("type") != "object"]
+        assert non_object == [], f"Tools with non-object outputSchema: {non_object}"
 
     def test_new_rev6_tools_registered(self, server_vault):
         tools = _run_async(mcp.list_tools())
@@ -698,13 +705,13 @@ class TestServerVaultGraph:
         result = _run_async(mcp.call_tool("find_orphans", {}))
         text = result[0][0].text
         data = json.loads(text)
-        assert any(item["path"] == "Inbox/orphan.md" for item in data)
+        assert any(item["path"] == "Inbox/orphan.md" for item in data["results"])
 
     def test_call_tool_get_outlinks(self, server_vault):
         result = _run_async(mcp.call_tool("get_outlinks", {"path": "Inbox/2026-07-20.md"}))
         text = result[0][0].text
         data = json.loads(text)
-        assert data == ["Second Brain Agent"]
+        assert data["results"] == ["Second Brain Agent"]
 
     def test_call_tool_get_outlinks_traversal(self, server_vault):
         with pytest.raises(Exception):

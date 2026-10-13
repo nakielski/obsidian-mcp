@@ -146,4 +146,4 @@ class TestIndexedTools:
         # old plain tool unaffected
         result = asyncio.run(mcp.call_tool("search_notes", {"query": "Mayer"}))
         data = json.loads(result[0][0].text)
-        assert len(data) >= 1
+        assert len(data["results"]) >= 1
