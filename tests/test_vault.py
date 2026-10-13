@@ -618,11 +618,18 @@ class TestOutputSchemas:
         assert schema["type"] == "object"
         assert set(schema["properties"].keys()) == {"path", "title", "tags", "metadata", "content"}
 
-    def test_search_notes_output_schema_is_array(self, server_vault):
+    def test_search_notes_output_schema_wraps_results(self, server_vault):
         tools = _run_async(mcp.list_tools())
         tool = next(t for t in tools if t.name == "search_notes")
         schema = tool.outputSchema
-        assert schema.get("type") == "array"
+        assert schema["type"] == "object"
+        assert schema["properties"]["results"]["type"] == "array"
+
+    def test_all_output_schemas_are_objects(self, server_vault):
+        # MCP spec: outputSchema.type MUST be "object"; strict clients reject anything else.
+        tools = _run_async(mcp.list_tools())
+        non_object = [t.name for t in tools if t.outputSchema and t.outputSchema.get("type") != "object"]
+        assert non_object == [], f"Tools with non-object outputSchema: {non_object}"
 
     def test_new_rev6_tools_registered(self, server_vault):
         tools = _run_async(mcp.list_tools())
