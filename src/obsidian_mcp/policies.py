@@ -16,6 +16,8 @@ link check (advisory warnings) and fail-closed for raw immutability and locks.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import datetime
 import json
 import os
@@ -87,6 +89,37 @@ def _shards_enabled() -> bool:
 
 # ---- 1. write log -------------------------------------------------------
 
+# Work-item uid a tool call links its writes to ('related_to' in the log).
+# Set per tool call via related_context(); empty outside of one.
+RELATED_TO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$")
+_RELATED_TO: contextvars.ContextVar[str] = contextvars.ContextVar("related_to", default="")
+
+
+def check_related_to(value: str | None) -> str:
+    """Validate a related_to value: empty, or a uid-like token (max 80 chars)."""
+    value = (value or "").strip()
+    if value and not RELATED_TO_RE.fullmatch(value):
+        raise ValueError(
+            "related_to must be a uid such as 'ent-20261005-belegarchiv' "
+            "(letters, digits, '.', '_', ':', '-'; at most 80 characters)."
+        )
+    return value
+
+
+@contextlib.contextmanager
+def related_context(value: str | None):
+    """Attach a work-item uid to every write-log line written inside the block.
+
+    Lets clients link their writes (raw + wiki + PARA of one task) without
+    appending log lines by hand: the server owns the write log.
+    """
+    token = _RELATED_TO.set(check_related_to(value))
+    try:
+        yield
+    finally:
+        _RELATED_TO.reset(token)
+
+
 def _sanitize_actor(actor: str) -> str:
     """Make an actor name safe for a filename component (shard naming)."""
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", actor.strip())
@@ -127,7 +160,7 @@ def log_write(
         "action": action,
         "path": rel_path,
         "uid": uid or "",
-        "related_to": related_to or "",
+        "related_to": related_to or _RELATED_TO.get() or "",
     }
     line = json.dumps(entry, ensure_ascii=False) + "\n"
     if _shards_enabled():

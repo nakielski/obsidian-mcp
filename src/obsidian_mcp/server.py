@@ -12,7 +12,7 @@ from mcp.shared.exceptions import McpError
 from mcp.types import ErrorData
 from pydantic import BaseModel, Field
 
-from . import __version__
+from . import __version__, policies
 from .vault import Note, Vault
 
 # ---- Module-level singleton Vault instance ----------------------------
@@ -38,7 +38,15 @@ def set_vault(vault: Vault) -> None:
     _vault_instance = vault
 
 
-mcp = FastMCP("obsidian-mcp")
+SERVER_INSTRUCTIONS = (
+    "Vault bookkeeping is done by this server: every write through a tool appends "
+    "its line to the write log (.vault-write-log.d/<actor>.jsonl) and writes under "
+    "wiki/ keep wiki/index.json in sync. Never append write-log lines or edit "
+    "wiki/index.json yourself, not even via the filesystem. To link the writes of "
+    "one task, pass the work item's uid as related_to."
+)
+
+mcp = FastMCP("obsidian-mcp", instructions=SERVER_INSTRUCTIONS)
 # S14: report the PROJECT version in serverInfo, not the mcp library's
 # version (was '1.29.1'). The lowlevel Server exposes `version`; FastMCP
 # does not forward it in its constructor.
@@ -46,6 +54,20 @@ mcp._mcp_server.version = __version__
 
 
 # ---- helpers -----------------------------------------------------------
+
+def _related_to_field():
+    """Optional work-item uid for the automatic write log (one Field per tool)."""
+    return Field(
+        default="",
+        description=(
+            "Optional uid of the work item this write belongs to, e.g. "
+            "'ent-20261005-belegarchiv' or the uid of the raw/ session record. "
+            "Stored as related_to in the write log, which the server writes "
+            "automatically for every write - never append log lines yourself. "
+            "Defaults to empty."
+        ),
+    )
+
 
 def _note_to_dict(n: Note) -> dict:
     return {
@@ -380,6 +402,7 @@ def create_note(
         default=None,
         description="Optional list of tags to store in the note's YAML frontmatter. Defaults to None (no tags). Example: ['mcp', 'ai'].",
     ),
+    related_to: str = _related_to_field(),
 ) -> CreateNoteOutput:
     """Create a new note with YAML frontmatter.
 
@@ -393,7 +416,8 @@ def create_note(
     Leading YAML frontmatter in content is parsed; wiki/ notes must include a uid field.
     """
     try:
-        n = _get_vault().create(path, content, tags)
+        with policies.related_context(related_to):
+            n = _get_vault().create(path, content, tags)
         return {"created": n.path}
     except (PermissionError, FileExistsError, ValueError, OSError) as e:
         raise _to_mcp_error(e)
@@ -407,6 +431,7 @@ def update_note(
     content: str = Field(
         description="New Markdown body to replace the existing body. YAML frontmatter and tags are preserved. Example: '# Updated Title' with new content below."
     ),
+    related_to: str = _related_to_field(),
 ) -> UpdateNoteOutput:
     """Replace the Markdown body of an existing note while preserving YAML frontmatter.
 
@@ -420,7 +445,8 @@ def update_note(
     Frontmatter and tags are preserved.
     """
     try:
-        n = _get_vault().update(path, content)
+        with policies.related_context(related_to):
+            n = _get_vault().update(path, content)
         return {"updated": n.path}
     except Exception as e:
         raise _to_mcp_error(e)
@@ -451,6 +477,7 @@ def delete_note(
     path: str = Field(
         description="Vault-relative path of the note to delete. Example: 'Inbox/old-note.md'."
     ),
+    related_to: str = _related_to_field(),
 ) -> DeleteNoteOutput:
     """Permanently delete a note from the vault. This action cannot be undone.
 
@@ -462,7 +489,8 @@ def delete_note(
     Side effects: DESTRUCTIVE — permanently removes the file from disk.
     """
     try:
-        deleted = _get_vault().delete(path)
+        with policies.related_context(related_to):
+            deleted = _get_vault().delete(path)
         return {"deleted": deleted}
     except Exception as e:
         raise _to_mcp_error(e)
@@ -477,6 +505,7 @@ def archive_note(
         default="06 Archive",
         description="Archive folder inside the vault. Default: '06 Archive'.",
     ),
+    related_to: str = _related_to_field(),
 ) -> ArchiveNoteOutput:
     """Archive a note instead of deleting it: move it to the archive folder.
 
@@ -492,7 +521,8 @@ def archive_note(
     """
     try:
         v = _get_vault()
-        target, incoming = v.archive(path, archive_dir)
+        with policies.related_context(related_to):
+            target, incoming = v.archive(path, archive_dir)
         return {"archived": target, "backlinks": incoming}
     except Exception as e:
         raise _to_mcp_error(e)
@@ -506,6 +536,7 @@ def append_to_note(
     content: str = Field(
         description="Markdown content to append to the end of the note. Example: '- New idea'. Content with leading YAML frontmatter is parsed as the note's frontmatter; wiki/ notes require a uid field."
     ),
+    related_to: str = _related_to_field(),
 ) -> AppendToNoteOutput:
     """Append Markdown content to the end of a note, creating it if it does not exist.
 
@@ -518,7 +549,8 @@ def append_to_note(
     Leading YAML frontmatter in content is parsed; wiki/ notes must include a uid field.
     """
     try:
-        n, created = _get_vault().append(path, content)
+        with policies.related_context(related_to):
+            n, created = _get_vault().append(path, content)
         return {"appended": True, "path": n.path, "created": created}
     except Exception as e:
         raise _to_mcp_error(e)
@@ -539,6 +571,7 @@ def manage_frontmatter(
         default=None,
         description="New value when action='set'. Required for 'set'; ignored for 'get' and 'delete'. Supports str, int, float, bool, or list. Example: 'review'.",
     ),
+    related_to: str = _related_to_field(),
 ) -> ManageFrontmatterOutput:
     """Get, set, or delete a single key in a note's YAML frontmatter.
 
@@ -573,9 +606,11 @@ def manage_frontmatter(
                     "value must be a scalar (str, int, float, bool) or a list. "
                     "Use a JSON-compatible type for the frontmatter value."
                 ))
-            vault.set_frontmatter(path, key, value)
+            with policies.related_context(related_to):
+                vault.set_frontmatter(path, key, value)
             return {"key": key, "value": value, "path": path}
-        vault.delete_frontmatter(path, key)
+        with policies.related_context(related_to):
+            vault.delete_frontmatter(path, key)
         return {"key": key, "deleted": True, "path": path}
     except Exception as e:
         raise _to_mcp_error(e)
@@ -593,6 +628,7 @@ def manage_tags(
         default=None,
         description="Tags to add or remove (ignored when action='list'). Defaults to None (treated as an empty list). Example: ['mcp', 'ai'].",
     ),
+    related_to: str = _related_to_field(),
 ) -> ManageTagsOutput:
     """Add, remove, or list tags on a note (combines frontmatter and inline #tags).
 
@@ -612,10 +648,12 @@ def manage_tags(
     vault = _get_vault()
     try:
         if action == "add":
-            updated = vault.add_tags(path, tags or [])
+            with policies.related_context(related_to):
+                updated = vault.add_tags(path, tags or [])
             return {"path": path, "tags": updated}
         if action == "remove":
-            updated = vault.remove_tags(path, tags or [])
+            with policies.related_context(related_to):
+                updated = vault.remove_tags(path, tags or [])
             return {"path": path, "tags": updated}
         all_tags = vault.list_tags(path)
         return {"path": path, "tags": all_tags}
@@ -637,6 +675,7 @@ def patch_note(
     content: str = Field(
         description="Markdown content to insert or to replace the section body with. Example: '- New bullet'."
     ),
+    related_to: str = _related_to_field(),
 ) -> PatchNoteOutput:
     """Surgically edit content under a specific Markdown heading.
 
@@ -654,7 +693,8 @@ def patch_note(
             f"Invalid patch action '{action}'. Use one of: 'append', 'prepend', or 'replace'."
         ))
     try:
-        n = _get_vault().patch_section(path, heading, action, content)
+        with policies.related_context(related_to):
+            n = _get_vault().patch_section(path, heading, action, content)
         return {"path": n.path, "heading": heading, "action": action}
     except Exception as e:
         raise _to_mcp_error(e)
@@ -673,6 +713,7 @@ def daily_note(
         default="",
         description="ISO date string in YYYY-MM-DD format. Defaults to today's date if omitted. Example: '2026-07-23'.",
     ),
+    related_to: str = _related_to_field(),
 ) -> DailyNoteOutput:
     """Read or append to a daily note in the daily notes folder (YYYY-MM-DD.md).
 
@@ -704,7 +745,8 @@ def daily_note(
                 n = vault.read(rel_path)
                 return {"date": date, "exists": True, "note": _note_to_dict(n)}
             return {"date": date, "exists": False}
-        n, created = vault.append(rel_path, content)
+        with policies.related_context(related_to):
+            n, created = vault.append(rel_path, content)
         return {"date": date, "appended": True, "created": created}
     except Exception as e:
         raise _to_mcp_error(e)
@@ -729,6 +771,7 @@ def search_and_replace(
         default=True,
         description="If true, matching respects uppercase/lowercase. Defaults to true.",
     ),
+    related_to: str = _related_to_field(),
 ) -> SearchAndReplaceOutput:
     """Find and replace text in the body of an existing note.
 
@@ -742,9 +785,10 @@ def search_and_replace(
     Side effects: MODIFIES the note body on disk.
     """
     try:
-        new_content, count = _get_vault().search_and_replace(
-            path, find, replace, use_regex, case_sensitive
-        )
+        with policies.related_context(related_to):
+            new_content, count = _get_vault().search_and_replace(
+                path, find, replace, use_regex, case_sensitive
+            )
         return {
             "path": path,
             "replacements": count,

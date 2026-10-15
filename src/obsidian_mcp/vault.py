@@ -187,6 +187,14 @@ def load_note(full_path: Path, vault_root: Path) -> Note:
     )
 
 
+# Appended to every bookkeeping denial: agents that hit it are usually trying
+# to "log" a write by hand (observed 2026-10-15) - the server already did.
+BOOKKEEPING_HINT = (
+    "The server writes the write log (.vault-write-log.d/<actor>.jsonl) and "
+    "wiki/index.json itself on every tool write - nothing to append by hand; "
+    "pass related_to on the write tool to link a work item."
+)
+
 class Vault:
     """High-level access to an Obsidian vault directory."""
 
@@ -237,7 +245,7 @@ class Vault:
                 raise PermissionError(
                     f"Access denied: '{banned}' is an internal bookkeeping "
                     "file of the vault server and not accessible via tools "
-                    f"({original})."
+                    f"({original}). {BOOKKEEPING_HINT}"
                 )
 
     def __init__(self, vault_root: str | Path):
@@ -292,7 +300,7 @@ class Vault:
                 raise PermissionError(
                     f"Access denied: '{banned}' is an internal bookkeeping "
                     "file of the vault server and not accessible via tools "
-                    f"({rel_path})."
+                    f"({rel_path}). {BOOKKEEPING_HINT}"
                 )
         if lowered and lowered[0] == ".obsidian":
             raise PermissionError(
@@ -318,7 +326,7 @@ class Vault:
         ):
             raise PermissionError(
                 f"Access denied: '{rel_norm}' is derived bookkeeping "
-                f"and not accessible via tools ({rel_path})."
+                f"and not accessible via tools ({rel_path}). {BOOKKEEPING_HINT}"
             )
         return candidate, rel_norm
 

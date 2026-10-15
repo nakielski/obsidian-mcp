@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`related_to` on every write tool** (`create_note`, `update_note`, `delete_note`,
+  `archive_note`, `append_to_note`, `manage_frontmatter`, `manage_tags`, `patch_note`,
+  `daily_note`, `search_and_replace`): optional work-item uid, written as `related_to`
+  into the automatic write-log line. It was the only field agents still added by hand,
+  which led them to append duplicate lines with invented timestamps to the legacy
+  `.vault-write-log.jsonl` next to the server's own shard entries (observed 2026-10-15).
+  Validated as a uid-like token (letters, digits, `.` `_` `:` `-`, max 80); an invalid
+  value fails the call before anything is written.
+- **Server instructions** (MCP `instructions`): the server writes the write log and
+  `wiki/index.json` itself; clients never append log lines or edit the index.
+- Denials for the bookkeeping files now say why there is nothing to do by hand.
+
 ### Changed (breaking for direct JSON consumers)
 - **MCP-spec-conform outputSchema**: `search_notes`, `list_notes`, `list_note_paths`,
   `get_backlinks`, `find_orphans` and `get_outlinks` now return `{"results": [...]}`
