@@ -40,7 +40,9 @@ via the Model Context Protocol.
 - Structured output schemas for every MCP tool (22/22)
 - Vault write policies: write log (per-actor shards in `.vault-write-log.d/`,
   legacy `.vault-write-log.jsonl` as fallback/opt-out), raw/ immutability,
-  agent lock (.vault-lock), wiki/index.json upkeep, link checking
+  agent lock (.vault-lock), wiki/index.json upkeep, link checking. The server owns
+  this bookkeeping: clients never append log lines themselves; every write tool
+  takes an optional `related_to` (work-item uid) that lands in the log line
 - archive_note: archive-instead-of-delete with backlink reporting
 - Incremental Whoosh full-text index (BM25, stemmed, field queries, fuzzy,
   did-you-mean) with configurable index directory
