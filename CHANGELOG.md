@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-10-19 — Write-log provenance and spec-conform output schemas
+
 ### Added
 - **`related_to` on every write tool** (`create_note`, `update_note`, `delete_note`,
   `archive_note`, `append_to_note`, `manage_frontmatter`, `manage_tags`, `patch_note`,
@@ -29,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 - `test_all_output_schemas_are_objects` guards against array-typed output schemas.
+- Test suite: 352 tests, all passing.
 
 ## [1.1.0] — 2026-09-19 — Security hardening
 
