@@ -54,6 +54,7 @@ via the Model Context Protocol.
 | Document | Description |
 |---|---|
 | [Build Guide](docs/BUILD_GUIDE.md) | Architecture walkthrough, code tour, extension guide, Docker/K8s deployment |
+| [Semantic Search](docs/SEMANTIC_SEARCH.md) | Optional hybrid search (Whoosh + Qdrant vectors), setup and design |
 | [AI Optimization Guide](docs/MCP_AI_OPTIMIZATION_GUIDE.md) | Best practices for AI-optimized MCP tool descriptions |
 | [Changelog](CHANGELOG.md) | Notable changes with added, fixed, and changed items |
 
@@ -129,6 +130,14 @@ The server runs on stdio. Register it with your client's standard MCP configurat
 | `search_query(query, limit?)` | Ranked Lucene-style full-text query (fields, fuzzy, ranges) |
 | `rebuild_index()` | Rebuild the full-text index from all notes |
 | `index_status()` | Index health: docs indexed vs. vault notes |
+
+Optional, with `pip install 'obsidian-mcp[semantic]'` and `OBSIDIAN_SEMANTIC=1`
+(see [Semantic Search](docs/SEMANTIC_SEARCH.md)):
+
+| Tool | Description |
+|---|---|
+| `hybrid_search(query, limit?, folder?, include_restricted?)` | Find notes by meaning and words, fused ranking |
+| `semantic_sync(max_seconds?, status_only?)` | Catch up the vector index; report its status |
 
 ## Prompts (3)
 

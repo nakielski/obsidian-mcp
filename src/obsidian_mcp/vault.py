@@ -213,6 +213,26 @@ class Vault:
             self._index = None
         return self._index
 
+    def _init_semantic(self):
+        """Lazily create the optional semantic index (OBSIDIAN_SEMANTIC=1).
+
+        Returns None when disabled or unavailable; the reason for the latter
+        is kept in ``semantic_error`` for status reporting. Never raises.
+        """
+        if getattr(self, "_semantic_checked", False):
+            return self._semantic
+        self._semantic_checked = True
+        self._semantic = None
+        self.semantic_error = ""
+        try:
+            from .semantic_index import SemanticIndex, semantic_enabled
+
+            if semantic_enabled():
+                self._semantic = SemanticIndex(self.root)
+        except Exception as e:
+            self.semantic_error = f"{type(e).__name__}: {e}"
+        return self._semantic
+
     # Internal bookkeeping files never reachable via tools (deny-list).
     # Component names, case-insensitive; '.'/'..' already rejected above.
     # Checked on BOTH the input segments and the resolved path (F1: a
@@ -657,10 +677,11 @@ class Vault:
     # ---- policy hooks ---------------------------------------------------
 
     def _after_write(self, rel_path: str, action: str, note) -> dict:
-        """Run post-write policies: write log, wiki index upkeep.
+        """Run post-write policies: write log, search indexes, wiki index upkeep.
 
-        Advisory results are collected and returned; failures never break the
-        completed write.
+        For action 'archive', ``rel_path`` is the OLD path and ``note`` the note
+        at its new location. Advisory results are collected and returned;
+        failures never break the completed write.
         """
         layer = policies.classify_layer(rel_path)
         result: dict = {"layer": layer}
@@ -681,6 +702,9 @@ class Vault:
                 result["indexed"] = True
             except Exception:
                 result["indexed"] = False
+        sx = self._init_semantic()
+        if sx is not None:
+            result["semantic"] = sx.on_write(rel_path, action, note)
         if note is not None and layer == "wiki":
             meta = note.metadata if hasattr(note, "metadata") else {}
             result["index"] = policies.update_wiki_index(
@@ -799,7 +823,14 @@ class Vault:
                 )
             dst.parent.mkdir(parents=True, exist_ok=True)
             src.rename(dst)
-            self._after_write(norm, "archive", note)
+            # Index the note under its NEW path (the old Note object still
+            # carries the old path, which left the archived note findable
+            # only at a path that no longer exists).
+            try:
+                moved = load_note(dst, self.root)
+            except Exception:
+                moved = note
+            self._after_write(norm, "archive", moved)
             policies.update_wiki_index(
                 self.root, norm, note.title, "", "", action="archive"
             )

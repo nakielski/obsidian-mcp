@@ -12,6 +12,7 @@ dependencies = [
 
 [project.scripts]
 obsidian-mcp = "obsidian_mcp.server:main"
+obsidian-mcp-semantic = "obsidian_mcp.semantic_index:cli"
 
 [project.urls]
 Homepage = "https://github.com/nakielski/obsidian-mcp"
@@ -19,6 +20,10 @@ Repository = "https://github.com/nakielski/obsidian-mcp"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
+# Optional semantic search (hybrid_search): vectors in Qdrant, embeddings from
+# Ollama or any OpenAI-compatible endpoint (HTTP via httpx, already a dependency
+# of mcp). Without this extra the server runs exactly as before.
+semantic = ["qdrant-client>=1.12,<2"]
 
 [build-system]
 requires = ["hatchling"]
