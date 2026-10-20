@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Optional semantic search** (`pip install 'obsidian-mcp[semantic]'`, `OBSIDIAN_SEMANTIC=1`):
+  new tools `hybrid_search` (Whoosh full text + Qdrant vectors, Reciprocal Rank Fusion)
+  and `semantic_sync`, plus the CLI `obsidian-mcp-semantic sync|status` for the first
+  bulk indexing. Embeddings from Ollama or any OpenAI-compatible endpoint.
+  Vectors are updated in the same write call as the full-text index; chunks are
+  content-addressed, so edits embed only changed sections and moves reuse vectors.
+  Folder restrictions (`OBSIDIAN_SEARCH_RESTRICTED`) are applied inside Qdrant;
+  excluded folders (`OBSIDIAN_SEMANTIC_EXCLUDE`) are never embedded. Backend errors
+  never fail a write: the note is queued and caught up by `semantic_sync`.
+  See [docs/SEMANTIC_SEARCH.md](docs/SEMANTIC_SEARCH.md).
+- Without the extra and the flag nothing changes: same 22 tools, `qdrant-client`
+  is never imported.
+
+### Fixed
+- `archive_note` left the full-text index pointing at the old path; the archived
+  note is now indexed under its new location.
+
+### Tests
+- 406 tests (54 new); the Qdrant tests run against Qdrant's in-process local mode
+  and are skipped when the extra is not installed. CI runs both variants.
+
 ## [2.0.0] — 2026-10-19 — Write-log provenance and spec-conform output schemas
 
 ### Added

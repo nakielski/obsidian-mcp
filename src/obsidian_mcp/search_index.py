@@ -26,7 +26,7 @@ try:
     from whoosh import fields as w_fields
     from whoosh import index as w_index
     from whoosh.analysis import StemmingAnalyzer
-    from whoosh.qparser import FuzzyTermPlugin, MultifieldParser
+    from whoosh.qparser import AndGroup, FuzzyTermPlugin, MultifieldParser, OrGroup
 
     WHOOSH_AVAILABLE = True
 except ImportError:  # pragma: no cover — whoosh is a hard dependency
@@ -131,16 +131,37 @@ class VaultIndex:
 
     # ---- read path -------------------------------------------------------
 
-    def search(self, query: str, limit: int = 20, default_fields=None) -> list[dict]:
+    def search(self, query: str, limit: int = 20, default_fields=None, *,
+               any_term: bool = False, folder: str = "", exclude_prefixes=()) -> list[dict]:
         """Run a query string. Plain terms search title+body; field queries,
-        booleans, phrases, wildcards, fuzzy and ranges per Whoosh syntax."""
+        booleans, phrases, wildcards, fuzzy and ranges per Whoosh syntax.
+
+        any_term: combine plain terms with OR (ranked by how many match)
+            instead of AND - suited to natural-language questions.
+        folder / exclude_prefixes: casefolded folder prefixes ('a/b/') the
+            hit path must / must not start with.
+        """
         fields = default_fields or ["title", "body"]
-        parser = MultifieldParser(fields, schema=self._ix.schema)
+        group = OrGroup.factory(0.9) if any_term else AndGroup
+        parser = MultifieldParser(fields, schema=self._ix.schema, group=group)
         parser.add_plugin(FuzzyTermPlugin())
         parsed = parser.parse(query)
+        folder_cf = folder.casefold()
+        excluded = tuple(p.casefold() for p in exclude_prefixes)
+        filtered = bool(folder_cf or excluded)
+
+        def allowed(path: str) -> bool:
+            p = path.casefold()
+            return (not folder_cf or p.startswith(folder_cf)) and not any(p.startswith(x) for x in excluded)
+
         out: list[dict] = []
         with self._ix.searcher() as s:
-            for hit in s.search(parsed, limit=limit):
+            # Over-fetch when filtering so excluded hits cannot crowd out allowed ones.
+            for hit in s.search(parsed, limit=None if filtered else limit):
+                if filtered and not allowed(hit["path"]):
+                    continue
+                if len(out) >= limit:
+                    break
                 out.append({
                     "path": hit["path"],
                     "title": hit.get("title", ""),
