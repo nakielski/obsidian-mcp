@@ -799,7 +799,14 @@ class Vault:
                 )
             dst.parent.mkdir(parents=True, exist_ok=True)
             src.rename(dst)
-            self._after_write(norm, "archive", note)
+            # Index the note under its NEW path (the old Note object still
+            # carries the old path, which left the archived note findable
+            # only at a path that no longer exists).
+            try:
+                moved = load_note(dst, self.root)
+            except Exception:
+                moved = note
+            self._after_write(norm, "archive", moved)
             policies.update_wiki_index(
                 self.root, norm, note.title, "", "", action="archive"
             )

@@ -147,3 +147,15 @@ class TestIndexedTools:
         result = asyncio.run(mcp.call_tool("search_notes", {"query": "Mayer"}))
         data = json.loads(result[0][0].text)
         assert len(data["results"]) >= 1
+
+
+# ---- archive keeps the full-text index on the new path -------------------
+
+
+def test_archive_reindexes_under_new_path(tmp_path):
+    v = Vault(tmp_path)
+    v.create("Inbox/Alpha.md", "# Alpha\n\nquantenflux text")
+    ix = v._init_index()
+    v.archive("Inbox/Alpha.md")
+    assert [h["path"] for h in ix.search("quantenflux")] == ["06 Archive/Alpha.md"]
+    assert ix.count() == 1
