@@ -208,6 +208,43 @@ def test_openai_embedder_orders_by_index_and_sends_key():
     assert seen == {"auth": "Bearer sk-test", "url": "https://llm.example/v1/embeddings"}
 
 
+def test_embedder_splits_batch_on_timeout_and_keeps_order():
+    sizes = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        sizes.append(len(body["input"]))
+        if len(body["input"]) > 2:
+            raise httpx.ReadTimeout("slow", request=request)
+        return httpx.Response(200, json={"embeddings": [[float(len(t))] for t in body["input"]]})
+
+    cfg = SemanticConfig(embed_batch=8)
+    texts = ["a" * n for n in range(1, 8)]
+    vecs = Embedder(cfg, transport=httpx.MockTransport(handler)).embed(texts)
+    assert [v[0] for v in vecs] == [1, 2, 3, 4, 5, 6, 7]
+    assert sizes == [7, 3, 1, 2, 4, 2, 2]  # 7 -> 3+4, 3 -> 1+2, 4 -> 2+2
+
+
+def test_embedder_single_input_timeout_raises_with_hint():
+    def handler(request):
+        raise httpx.ReadTimeout("slow", request=request)
+
+    with pytest.raises(EmbeddingError, match="OBSIDIAN_EMBED_TIMEOUT"):
+        Embedder(SemanticConfig(embed_batch=4), transport=httpx.MockTransport(handler)).embed(["x", "y"])
+
+
+def test_embedder_connect_error_is_not_split():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        raise httpx.ConnectError("refused", request=request)
+
+    with pytest.raises(EmbeddingError, match="failed"):
+        Embedder(SemanticConfig(embed_batch=8), transport=httpx.MockTransport(handler)).embed(["a"] * 8)
+    assert len(calls) == 1
+
+
 def test_embedder_count_mismatch_raises():
     t = httpx.MockTransport(lambda r: httpx.Response(200, json={"embeddings": []}))
     with pytest.raises(EmbeddingError, match="pulled"):

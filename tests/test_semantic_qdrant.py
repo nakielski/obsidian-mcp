@@ -239,8 +239,33 @@ def test_sync_stops_early_when_backend_is_down(env):
 
     emb.embed = down
     stats = sx.sync(v.list_notes())
-    assert len(calls) == 3 and stats["failed"] == 3 and stats["remaining"] == 7
+    # three notes, then one probe that confirms the outage
+    assert len(calls) == 4 and calls[-1] == ["ping"]
+    assert stats["failed"] == 3 and stats["remaining"] == 7
     assert not stats["complete"] and sx.backend_down()
+    assert "connection refused" in stats["last_error"]
+
+
+def test_sync_continues_past_note_failures_when_backend_is_healthy(env):
+    v, sx, emb = env
+    root = pathlib.Path(v.root)
+    for i in range(4):
+        (root / f"Bad{i}.md").write_text(f"# Bad{i}\n\nKAPUTT {i}", encoding="utf-8")
+    for i in range(3):
+        (root / f"Good{i}.md").write_text(f"# Good{i}\n\nGut {i}", encoding="utf-8")
+    real = emb.embed
+
+    def picky(texts):
+        if any("KAPUTT" in t for t in texts):
+            raise EmbeddingError("timed out for a single input")
+        return real(texts)
+
+    emb.embed = picky
+    stats = sx.sync(v.list_notes())
+    assert stats["failed"] == 4 and stats["changed"] == 3 and stats["remaining"] == 0
+    assert not stats["complete"] and not sx.backend_down()
+    assert "single input" in stats["last_error"]
+    assert all(points(sx, f"Good{i}.md") for i in range(3))
 
 
 def test_successful_sync_resumes_inline_indexing(env):

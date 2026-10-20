@@ -104,7 +104,7 @@ class SemanticConfig:
     embed_model: str = "bge-m3"
     embed_api_key: str | None = None
     embed_timeout: float = 20.0
-    embed_batch: int = 16
+    embed_batch: int = 8
     query_prefix: str = ""
     doc_prefix: str = ""
     exclude: tuple[str, ...] = ()
@@ -132,7 +132,7 @@ class SemanticConfig:
             embed_model=model,
             embed_api_key=env("OBSIDIAN_EMBED_API_KEY") or None,
             embed_timeout=float(env("OBSIDIAN_EMBED_TIMEOUT", "20")),
-            embed_batch=max(1, int(env("OBSIDIAN_EMBED_BATCH", "16"))),
+            embed_batch=max(1, int(env("OBSIDIAN_EMBED_BATCH", "8"))),
             query_prefix=env("OBSIDIAN_EMBED_QUERY_PREFIX", ""),
             doc_prefix=env("OBSIDIAN_EMBED_DOC_PREFIX", ""),
             exclude=_prefix_list("OBSIDIAN_SEMANTIC_EXCLUDE"),
@@ -276,30 +276,55 @@ class Embedder:
     def embed(self, texts: list[str]) -> list[list[float]]:
         out: list[list[float]] = []
         for i in range(0, len(texts), self.cfg.embed_batch):
-            batch = texts[i : i + self.cfg.embed_batch]
-            try:
-                if self.cfg.embed_api == "ollama":
-                    r = self._http.post(f"{self.cfg.embed_url}/api/embed",
-                                        json={"model": self.cfg.embed_model, "input": batch})
-                    r.raise_for_status()
-                    vecs = r.json().get("embeddings") or []
-                else:
-                    r = self._http.post(f"{self.cfg.embed_url}/embeddings",
-                                        json={"model": self.cfg.embed_model, "input": batch})
-                    r.raise_for_status()
-                    data = sorted(r.json().get("data") or [], key=lambda d: d.get("index", 0))
-                    vecs = [d.get("embedding") for d in data]
-            except httpx.HTTPError as e:
-                raise EmbeddingError(f"embedding request to {self.cfg.embed_url} failed: {e}") from e
-            except ValueError as e:
-                raise EmbeddingError(f"embedding endpoint returned invalid JSON: {e}") from e
-            if len(vecs) != len(batch) or not all(isinstance(v, list) and v for v in vecs):
-                raise EmbeddingError(
-                    f"embedding endpoint returned {len(vecs)} vectors for {len(batch)} inputs "
-                    f"(model {self.cfg.embed_model!r} pulled?)"
-                )
-            out.extend(vecs)
+            out.extend(self._embed_batch(texts[i : i + self.cfg.embed_batch]))
         return out
+
+    def _embed_batch(self, batch: list[str]) -> list[list[float]]:
+        """One request; on a read timeout split the batch and retry the halves.
+
+        Ollama embeds the inputs of one request one after another, so on a busy
+        CPU a batch of long sections can outlast the timeout although every
+        single input is fast enough. Splitting keeps large notes indexable
+        without raising the timeout for every request. Connection failures
+        are not split: the backend is down and retrying halves only multiplies
+        the wait.
+        """
+        try:
+            return self._request(batch)
+        except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
+            if len(batch) == 1:
+                raise EmbeddingError(
+                    f"embedding request to {self.cfg.embed_url} timed out after {self.cfg.embed_timeout:g}s "
+                    f"for a single input ({len(batch[0])} chars); raise OBSIDIAN_EMBED_TIMEOUT"
+                ) from e
+            mid = len(batch) // 2
+            return self._embed_batch(batch[:mid]) + self._embed_batch(batch[mid:])
+
+    def _request(self, batch: list[str]) -> list[list[float]]:
+        try:
+            if self.cfg.embed_api == "ollama":
+                r = self._http.post(f"{self.cfg.embed_url}/api/embed",
+                                    json={"model": self.cfg.embed_model, "input": batch})
+                r.raise_for_status()
+                vecs = r.json().get("embeddings") or []
+            else:
+                r = self._http.post(f"{self.cfg.embed_url}/embeddings",
+                                    json={"model": self.cfg.embed_model, "input": batch})
+                r.raise_for_status()
+                data = sorted(r.json().get("data") or [], key=lambda d: d.get("index", 0))
+                vecs = [d.get("embedding") for d in data]
+        except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout):
+            raise  # handled by _embed_batch
+        except httpx.HTTPError as e:
+            raise EmbeddingError(f"embedding request to {self.cfg.embed_url} failed: {e}") from e
+        except ValueError as e:
+            raise EmbeddingError(f"embedding endpoint returned invalid JSON: {e}") from e
+        if len(vecs) != len(batch) or not all(isinstance(v, list) and v for v in vecs):
+            raise EmbeddingError(
+                f"embedding endpoint returned {len(vecs)} vectors for {len(batch)} inputs "
+                f"(model {self.cfg.embed_model!r} pulled?)"
+            )
+        return vecs
 
 
 # ---- pending store -------------------------------------------------------
@@ -674,6 +699,16 @@ class SemanticIndex:
             info["last_error"] = f"{type(e).__name__}: {e}"
         return info
 
+    def _backend_ok(self) -> bool:
+        """Tiny live probe of both backends (one short embedding, one Qdrant call)."""
+        try:
+            self.embedder.embed(["ping"])
+            self.client.collection_exists(self.collection)
+            return True
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
+            return False
+
     def sync(self, notes, max_seconds: float | None = None, progress=None) -> dict:
         """Delta-sync all notes: embed what changed, drop what vanished.
 
@@ -696,19 +731,29 @@ class SemanticIndex:
         stats = {"notes": len(ordered), "checked": 0, "changed": 0, "failed": 0,
                  "removed_points": removed, "remaining": 0}
         streak = 0
+        reachable = outage = False  # backend answered at least once / run stopped by an outage
         for i, note in enumerate(ordered):
             if max_seconds is not None and time.monotonic() - start >= max_seconds:
                 stats["remaining"] = len(ordered) - i
                 break
-            if streak >= 3:  # backend down: do not wait out a timeout per note
-                stats["remaining"] = len(ordered) - i
-                break
+            if streak >= 3:
+                # Three failures in a row: stop only if the backend is really down.
+                # Note-specific failures (an oversized section, a bad file) must not
+                # stall the run - pending notes go first, so they would block every
+                # later run as well.
+                if not self._backend_ok():
+                    outage = True
+                    stats["remaining"] = len(ordered) - i
+                    break
+                reachable = True
+                streak = 0
             try:
                 r = self.index_note(note, existing=existing_all.get(note.path, {}))
                 if r.get("added") or r.get("removed") or r.get("relabeled"):
                     stats["changed"] += 1
                 if note.path in pending:
                     self.pending.discard(note.path)
+                reachable = True
                 streak = 0
             except Exception as e:
                 stats["failed"] += 1
@@ -719,9 +764,12 @@ class SemanticIndex:
             if progress and stats["checked"] % 100 == 0:
                 progress(stats)
         stats["complete"] = stats["remaining"] == 0 and stats["failed"] == 0
+        stats["last_error"] = self.last_error if stats["failed"] else ""
         if stats["failed"] == 0:
             self.last_error = ""
-            self._down_until = 0.0  # backend proved reachable: writes index inline again
+        if stats["failed"] == 0 or (reachable and not outage):
+            # backend proved reachable (failures were note-specific): writes index inline again
+            self._down_until = 0.0
         else:
             self._down_until = time.monotonic() + self.cfg.backoff_seconds
         stats["seconds"] = round(time.monotonic() - start, 1)

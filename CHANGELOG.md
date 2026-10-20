@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is never imported.
 
 ### Fixed
+- Semantic sync on a slow (CPU-only) embedding server: an embedding request that
+  times out is split in halves and retried down to a single section, so long
+  notes no longer fail as a whole. Default `OBSIDIAN_EMBED_BATCH` lowered from
+  16 to 8.
+- Semantic sync no longer stalls on note-specific failures: after three failures
+  in a row it probes Ollama/Qdrant and only stops when they are really down.
+  Before, failed notes were retried first on every run and ended each run
+  after three notes. The sync result now includes `last_error`.
 - `archive_note` left the full-text index pointing at the old path; the archived
   note is now indexed under its new location.
 

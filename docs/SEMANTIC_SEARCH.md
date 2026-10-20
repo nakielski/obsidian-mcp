@@ -47,7 +47,8 @@ Environment:
 | `OBSIDIAN_SEMANTIC_EXCLUDE` | empty | Comma-separated folders that are never embedded |
 | `OBSIDIAN_SEMANTIC_MIN_SCORE` | `0` (off) | Drop vector hits below this cosine similarity; tune per model |
 | `OBSIDIAN_SEMANTIC_CHUNK_CHARS` | `2000` | Max characters per chunk |
-| `OBSIDIAN_EMBED_TIMEOUT` / `OBSIDIAN_QDRANT_TIMEOUT` | `20` / `10` s | Request timeouts |
+| `OBSIDIAN_EMBED_BATCH` | `8` | Chunks per embedding request; a request that times out is split in halves and retried |
+| `OBSIDIAN_EMBED_TIMEOUT` / `OBSIDIAN_QDRANT_TIMEOUT` | `20` / `10` s | Request timeouts (per request, so per batch) |
 | `OBSIDIAN_SEMANTIC_BACKOFF` | `60` s | Pause after a backend error before the next write tries again |
 | `OBSIDIAN_SEMANTIC_INLINE_MAX` | `32` | A write needing more new chunk embeddings than this is queued for `semantic_sync` instead of blocking the tool call |
 
@@ -83,8 +84,16 @@ are derived from path and content, so concurrent writers converge.
   completes, the note is recorded in `semantic-pending.json` (next to the
   Whoosh index, machine-local) and the next `semantic_sync` catches it up.
   `hybrid_search` answers from full text meanwhile and says so in `mode` and
-  `warning`. A sync stops after three failures in a row instead of waiting
-  out a timeout per note; a successful sync resumes inline indexing at once.
+  `warning`. After three failures in a row a sync probes both backends with
+  one tiny request: if they are down it stops instead of waiting out a timeout
+  per note, otherwise the failures were note-specific and it carries on. The
+  sync result reports `last_error`. A sync that reached the backend resumes
+  inline indexing at once.
+- **Slow embedding servers**: Ollama embeds the inputs of one request one
+  after another, so on a busy CPU a batch of long sections can outlast the
+  timeout. Such a batch is split in halves until it fits; only a single
+  section that still times out counts as a failure (raise
+  `OBSIDIAN_EMBED_TIMEOUT` then). Connection errors are not split.
 - **Fusion**: `score = Σ 1 / (60 + rank)` over both lists. A note found by
   both retrievers ranks above one found by a single retriever at the same
   rank. Natural-language questions use OR semantics on the full-text side.
