@@ -697,7 +697,7 @@ class SemanticIndex:
                  "removed_points": removed, "remaining": 0}
         streak = 0
         for i, note in enumerate(ordered):
-            if max_seconds is not None and time.monotonic() - start > max_seconds:
+            if max_seconds is not None and time.monotonic() - start >= max_seconds:
                 stats["remaining"] = len(ordered) - i
                 break
             if streak >= 3:  # backend down: do not wait out a timeout per note
