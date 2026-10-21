@@ -109,9 +109,9 @@ The server runs on stdio. Register it with your client's standard MCP configurat
 | Tool | Description |
 |---|---|
 | `read_note(path)` | Read a note (title, tags, metadata, content) |
-| `search_notes(query)` | Full-text search across title and body |
-| `list_notes(folder?)` | List notes, optionally scoped to a folder |
-| `list_note_paths(folder?)` | List note paths only (lightweight) |
+| `search_notes(query, include_restricted?)` | Full-text search across title and body |
+| `list_notes(folder?, include_restricted?)` | List notes, optionally scoped to a folder |
+| `list_note_paths(folder?, include_restricted?)` | List note paths only (lightweight) |
 | `create_note(path, content, tags?)` | Create a note with frontmatter |
 | `update_note(path, content)` | Update body (frontmatter preserved) |
 | `delete_note(path)` | Permanently delete a note |
@@ -121,15 +121,24 @@ The server runs on stdio. Register it with your client's standard MCP configurat
 | `patch_note(path, heading, action, content)` | Insert/prepend/replace under a heading |
 | `daily_note(action, content?, date?)` | Read/append daily notes (YYYY-MM-DD.md) |
 | `search_and_replace(path, find, replace, use_regex?, case_sensitive?)` | Find/replace in note body |
-| `get_backlinks(title)` | Find notes linking via wikilinks |
-| `vault_graph()` | Full vault link graph (nodes, edges, stats) |
-| `find_orphans()` | Notes with no incoming or outgoing wikilinks |
+| `get_backlinks(title, include_restricted?)` | Find notes linking via wikilinks |
+| `vault_graph(include_restricted?)` | Full vault link graph (nodes, edges, stats) |
+| `find_orphans(include_restricted?)` | Notes with no incoming or outgoing wikilinks |
 | `get_outlinks(path)` | Outgoing wikilinks from a note |
-| `vault_health()` | Health score + issue report (0–100) |
+| `vault_health(include_restricted?)` | Health score + issue report (0–100) |
 | `archive_note(path, archive_dir?)` | Move note to archive folder; report backlinks |
-| `search_query(query, limit?)` | Ranked Lucene-style full-text query (fields, fuzzy, ranges) |
+| `search_query(query, limit?, include_restricted?)` | Ranked Lucene-style full-text query (fields, fuzzy, ranges) |
 | `rebuild_index()` | Rebuild the full-text index from all notes |
 | `index_status()` | Index health: docs indexed vs. vault notes |
+
+**Restricted folders (optional):** `OBSIDIAN_SEARCH_RESTRICTED="05 People,Private"`
+hides these folders from every search, listing and graph tool (and from
+`hybrid_search`) unless the call sets `include_restricted=true`. Results then
+carry `restricted_hidden: true`. Reading a note by its path, or listing a
+restricted folder by name, stays possible: naming it is an explicit request.
+Links into a hidden folder still resolve (no false broken links), but the
+graph shows only the link text, not the hidden path. Unset (default): nothing
+is hidden.
 
 Optional, with `pip install 'obsidian-mcp[semantic]'` and `OBSIDIAN_SEMANTIC=1`
 (see [Semantic Search](docs/SEMANTIC_SEARCH.md)):

@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `OBSIDIAN_SEARCH_RESTRICTED` now applies to every search, listing and graph
+  tool, not only `hybrid_search`: `search_notes`, `search_query`, `list_notes`,
+  `list_note_paths`, `get_backlinks`, `vault_graph`, `find_orphans`,
+  `vault_health` and the `vault://structure` resource hide restricted folders
+  unless `include_restricted=true`; results report `restricted_hidden`.
+  `read_note`/`get_outlinks` by path and listing a restricted folder by name
+  stay allowed. Unset, nothing changes.
 - **Optional semantic search** (`pip install 'obsidian-mcp[semantic]'`, `OBSIDIAN_SEMANTIC=1`):
   new tools `hybrid_search` (Whoosh full text + Qdrant vectors, Reciprocal Rank Fusion)
   and `semantic_sync`, plus the CLI `obsidian-mcp-semantic sync|status` for the first
