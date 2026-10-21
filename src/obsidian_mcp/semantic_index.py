@@ -822,8 +822,13 @@ def cli(argv: list[str] | None = None) -> int:
         # back to full text because the server flag is missing in the shell.
         os.environ.setdefault("OBSIDIAN_SEMANTIC", "1")
 
+        qpath = Path(args.file).resolve()
+        try:  # the question note lives in the vault: never count it as a hit
+            exclude = (qpath.relative_to(Path(vault.root).resolve()).as_posix(),)
+        except ValueError:
+            exclude = ()
         result = run_eval(vault, load_questions(args.file), k=args.k,
-                          include_restricted=args.include_restricted)
+                          include_restricted=args.include_restricted, exclude_paths=exclude)
         print(json.dumps(result, indent=2, ensure_ascii=False) if args.json else to_markdown(result))
         return 0
     index = SemanticIndex(vault.root)
