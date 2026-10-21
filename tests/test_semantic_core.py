@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from obsidian_mcp import semantic_index as si
-from obsidian_mcp.hybrid import hybrid_query, make_snippet, rrf_fuse
+from obsidian_mcp.hybrid import hybrid_query, make_snippet, rrf_fuse, variant_key
 from obsidian_mcp.semantic_index import (
     Embedder,
     EmbeddingError,
@@ -165,6 +165,51 @@ def test_rrf_limit_and_semantic_heading():
     fused = rrf_fuse([], sem, limit=2)
     assert [f["path"] for f in fused] == ["0.md", "1.md"]
     assert fused[0]["heading"] == "h0"
+
+
+def test_variant_key_groups_versions_and_copies_only():
+    k = variant_key("04 Resources/LinkedIn/MCP Artikel 2/MCP Artikel 2 Entwurf v0.6 2026-10-19.md")
+    assert k == "mcp artikel 2 entwurf"
+    assert variant_key("06 Archive/MCP Artikel 2 Entwurf v0.3 (2026-10-18).md") == k
+    assert variant_key("00 Inbox/MCP Artikel 2 Entwurf v0.7 2026-10-20.md") == k
+    assert (variant_key("raw/conversations/2026-05-19 Hermes Agent Update Anleitung.md")
+            == variant_key("02 Areas/KI/2026-05-19 Hermes Agent Update Anleitung.md"))
+    # generic names never merge unrelated notes
+    for path in ("raw/repos/a/SKILL.md", "raw/repos/a/docs/index.md", "Daily/2026-10-20.md", "x/v1.md"):
+        assert variant_key(path) == path
+    assert variant_key("a/Second Brain Artikel.md") != variant_key("a/Second Brain Artikel Humanized.md")
+
+
+def test_fusion_folds_variants_and_prefers_live_copy():
+    ft = [{"path": "06 Archive/Plan v0.2 Notiz.md"}, {"path": "Projekte/Plan v0.3 Notiz.md"},
+          {"path": "Other.md"}]
+    fused = rrf_fuse(ft, [], limit=10)
+    assert [f["path"] for f in fused] == ["Projekte/Plan v0.3 Notiz.md", "Other.md"]
+    assert fused[0]["variants"] == ["06 Archive/Plan v0.2 Notiz.md"]
+    assert fused[0]["score"] == round(1 / 61, 6)  # best member's score, copies add nothing
+
+
+def test_fusion_reserves_top_hits_of_each_retriever():
+    # 12 notes found by both lists (loose OR full text) vs. semantic-only top hits
+    both = [{"path": f"both{i}.md"} for i in range(12)]
+    sem_only = [{"path": f"sem{i}.md"} for i in range(3)]
+    ft = list(both)
+    sem = sem_only + both
+    plain = rrf_fuse(ft, sem, limit=10, reserve=0)
+    assert not any(f["path"].startswith("sem") for f in plain)  # the RRF crowding effect
+    fused = rrf_fuse(ft, sem, limit=10)
+    paths = [f["path"] for f in fused]
+    assert len(paths) == 10 and {"sem0.md", "sem1.md", "sem2.md"} <= set(paths)
+    scores = [f["score"] for f in fused]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_fusion_reserve_never_exceeds_limit():
+    sem = [{"path": f"s{i}.md"} for i in range(5)]
+    ft = [{"path": f"f{i}.md"} for i in range(5)]
+    assert len(rrf_fuse(ft, sem, limit=1)) == 1
+    two = rrf_fuse(ft, sem, limit=2)
+    assert {f["path"] for f in two} == {"s0.md", "f0.md"}
 
 
 def test_snippet_strips_markup_and_truncates():

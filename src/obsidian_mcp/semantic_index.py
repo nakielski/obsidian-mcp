@@ -109,6 +109,7 @@ class SemanticConfig:
     doc_prefix: str = ""
     exclude: tuple[str, ...] = ()
     restricted: tuple[str, ...] = ()
+    secondary: tuple[str, ...] = ("06 archive", "raw")
     max_chunk_chars: int = 2000
     backoff_seconds: float = 60.0
     min_score: float = 0.0
@@ -137,6 +138,8 @@ class SemanticConfig:
             doc_prefix=env("OBSIDIAN_EMBED_DOC_PREFIX", ""),
             exclude=_prefix_list("OBSIDIAN_SEMANTIC_EXCLUDE"),
             restricted=_prefix_list("OBSIDIAN_SEARCH_RESTRICTED"),
+            secondary=(_prefix_list("OBSIDIAN_SEARCH_SECONDARY")
+                       if "OBSIDIAN_SEARCH_SECONDARY" in os.environ else ("06 archive", "raw")),
             max_chunk_chars=max(200, int(env("OBSIDIAN_SEMANTIC_CHUNK_CHARS", "2000"))),
             backoff_seconds=float(env("OBSIDIAN_SEMANTIC_BACKOFF", "60")),
             min_score=float(env("OBSIDIAN_SEMANTIC_MIN_SCORE", "0")),
