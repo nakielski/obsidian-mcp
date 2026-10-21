@@ -785,6 +785,9 @@ class SemanticIndex:
 def cli(argv: list[str] | None = None) -> int:
     """obsidian-mcp-semantic status | sync [--max-seconds N]
 
+    sync also reconciles the Whoosh full-text index with the files on disk
+    (notes moved, edited or deleted outside the server).
+
     Run the initial bulk indexing here (on the server, in the background),
     not through the MCP tool: thousands of notes on a CPU-only Ollama take long.
     """
@@ -810,12 +813,21 @@ def cli(argv: list[str] | None = None) -> int:
         print(json.dumps(index.status(), indent=2, ensure_ascii=False))
         return 0
     notes = vault.list_notes()
+    fulltext = None
+    ix = vault._init_index()
+    if ix is not None:  # keep the full-text index in step with out-of-band changes too
+        try:
+            fulltext = ix.reconcile(notes)
+        except Exception as e:
+            fulltext = {"error": f"{type(e).__name__}: {e}"}
 
     def progress(s):
         print(f"[obsidian-mcp-semantic] {s['checked']}/{s['notes']} checked, "
               f"{s['changed']} changed, {s['failed']} failed", file=sys.stderr, flush=True)
 
     stats = index.sync(notes, max_seconds=args.max_seconds, progress=progress)
+    if fulltext is not None:
+        stats["fulltext"] = fulltext
     print(json.dumps(stats, indent=2, ensure_ascii=False))
     return 0 if stats["failed"] == 0 else 1
 

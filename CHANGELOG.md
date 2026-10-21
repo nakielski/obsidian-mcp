@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is never imported.
 
 ### Fixed
+- Full-text index drift after out-of-band changes: notes moved, edited or
+  deleted outside the server (Syncthing, Obsidian editor, a second server)
+  stayed in the Whoosh index under the old path and were missing under the new
+  one. `VaultIndex.reconcile()` compares path and file signature and fixes only
+  what differs; `obsidian-mcp-semantic sync` runs it on every pass. Full-text
+  searches skip hits whose file is gone. The index gains a stored `fsig` field;
+  an older index is rebuilt once on the first reconcile.
+- `hybrid_search` variants: the newest live copy (highest version, then date in
+  the file name) represents the group instead of the best-scored one.
 - `hybrid_search` buried the best semantic matches of natural-language questions:
   with RRF (k=60) any note found by both retrievers - even a loose OR word
   match at rank 30 - outranked the best note found by meaning only. The three

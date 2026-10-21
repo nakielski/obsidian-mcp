@@ -55,6 +55,7 @@ def build_schema() -> "w_fields.Schema":
         status=w_fields.KEYWORD(lowercase=True, stored=True),
         uid=w_fields.ID(stored=True),
         mtime=w_fields.DATETIME(stored=True, sortable=True),
+        fsig=w_fields.STORED(),  # file size + mtime: detects out-of-band changes
     )
 
 
@@ -103,7 +104,15 @@ class VaultIndex:
             "status": str(meta.get("status", "") or "").lower(),
             "uid": str(meta.get("uid", "") or ""),
             "mtime": mtime,
+            "fsig": self._file_sig(path),
         }
+
+    def _file_sig(self, rel_path: str) -> str:
+        try:
+            st = (self.vault_root / rel_path).stat()
+        except OSError:
+            return ""
+        return f"{st.st_size}:{st.st_mtime_ns}"
 
     def index_note(self, note) -> None:
         """Add or replace a note in the index."""
@@ -125,6 +134,35 @@ class VaultIndex:
             writer.add_document(**self._note_fields(n))
         writer.commit()
         return {"indexed": len(notes), "index_dir": str(self.index_dir)}
+
+    def reconcile(self, notes) -> dict:
+        """Bring the index in line with the files on disk.
+
+        Writes through the server update the index directly. Changes that
+        bypass it (Syncthing from another device, the Obsidian editor, a
+        second MCP server with its own index, scripts) leave stale entries:
+        moved notes stay findable under their old path and are missing under
+        the new one. This compares path and file signature of every note and
+        only touches what differs. An index from before the signature field
+        is rebuilt once.
+        """
+        if "fsig" not in self._ix.schema.names():
+            stats = self.rebuild(notes)
+            return {"rebuilt": True, "added": stats["indexed"], "updated": 0, "removed": 0}
+        current = {n.path: n for n in notes}
+        with self._ix.searcher() as s:
+            stored = {f["path"]: f.get("fsig", "") for f in s.all_stored_fields()}
+        removed = [p for p in stored if p not in current]
+        added = [p for p in current if p not in stored]
+        updated = [p for p in current if p in stored and stored[p] != self._file_sig(p)]
+        if removed or added or updated:
+            writer = self._ix.writer(timeout=30.0)
+            for p in removed:
+                writer.delete_by_term("path", p)
+            for p in added + updated:
+                writer.update_document(**self._note_fields(current[p]))
+            writer.commit()
+        return {"rebuilt": False, "added": len(added), "updated": len(updated), "removed": len(removed)}
 
     def count(self) -> int:
         return self._ix.doc_count()
@@ -157,8 +195,12 @@ class VaultIndex:
         out: list[dict] = []
         with self._ix.searcher() as s:
             # Over-fetch when filtering so excluded hits cannot crowd out allowed ones.
-            for hit in s.search(parsed, limit=None if filtered else limit):
+            # Over-fetch as well, because hits whose file is gone (moved or deleted
+            # outside the server, not reconciled yet) are skipped.
+            for hit in s.search(parsed, limit=None if filtered else limit * 2 + 10):
                 if filtered and not allowed(hit["path"]):
+                    continue
+                if not (self.vault_root / hit["path"]).is_file():
                     continue
                 if len(out) >= limit:
                     break

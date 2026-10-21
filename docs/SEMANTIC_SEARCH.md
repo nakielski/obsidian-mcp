@@ -72,6 +72,13 @@ removes vectors of notes deleted or moved outside the server, e.g. by a file
 sync. Several machines sharing one vault can share one collection: point ids
 are derived from path and content, so concurrent writers converge.
 
+The CLI `sync` also reconciles the Whoosh full-text index with the files on
+disk (result key `fulltext`): notes moved, edited or deleted outside the
+server are re-indexed or dropped. Without that, a note moved by Syncthing or
+the Obsidian editor stays findable in full text under its old path. Full-text
+hits whose file no longer exists are skipped at query time in any case. An
+index created before this version is rebuilt once on the first sync.
+
 ## How it works
 
 - **Chunks**: a note is split at H1–H3 headings (`#` inside code fences is
