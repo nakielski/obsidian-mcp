@@ -783,7 +783,7 @@ class SemanticIndex:
 
 
 def cli(argv: list[str] | None = None) -> int:
-    """obsidian-mcp-semantic status | sync [--max-seconds N]
+    """obsidian-mcp-semantic status | sync [--max-seconds N] | eval FILE [--k N] [--json]
 
     sync also reconciles the Whoosh full-text index with the files on disk
     (notes moved, edited or deleted outside the server).
@@ -796,6 +796,13 @@ def cli(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="show collection, point count and pending notes")
     p_sync = sub.add_parser("sync", help="embed new/changed notes, remove vanished ones")
     p_sync.add_argument("--max-seconds", type=float, default=None)
+    p_eval = sub.add_parser("eval", help="compare search_query and hybrid_search on a question set "
+                            "(YAML/JSON file or the first ```yaml block of a Markdown note)")
+    p_eval.add_argument("file")
+    p_eval.add_argument("--k", type=int, default=10, help="top k per retriever (default 10)")
+    p_eval.add_argument("--json", action="store_true", help="print JSON instead of Markdown")
+    p_eval.add_argument("--include-restricted", action="store_true",
+                        help="also search OBSIDIAN_SEARCH_RESTRICTED folders")
     args = parser.parse_args(argv)
 
     root = os.environ.get("OBSIDIAN_VAULT_ROOT", "")
@@ -808,6 +815,13 @@ def cli(argv: list[str] | None = None) -> int:
     from .vault import Vault
 
     vault = Vault(root)
+    if args.cmd == "eval":
+        from .evaluation import load_questions, run_eval, to_markdown
+
+        result = run_eval(vault, load_questions(args.file), k=args.k,
+                          include_restricted=args.include_restricted)
+        print(json.dumps(result, indent=2, ensure_ascii=False) if args.json else to_markdown(result))
+        return 0
     index = SemanticIndex(vault.root)
     if args.cmd == "status":
         print(json.dumps(index.status(), indent=2, ensure_ascii=False))

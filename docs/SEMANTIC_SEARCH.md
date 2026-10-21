@@ -118,6 +118,26 @@ index created before this version is rebuilt once on the first sync.
     outside the `OBSIDIAN_SEARCH_SECONDARY` folders represents the group, the
     rest is listed in `variants`.
 
+## Measuring quality
+
+`obsidian-mcp-semantic eval FILE` runs a question set against `search_query`
+and `hybrid_search` (same environment as the server, folder restriction
+applies) and prints a Markdown report: hit@1, hit@5, hit@k and MRR per
+retriever, how many questions only one of them answers, and per question the
+rank of the first expected note. The question set is YAML/JSON, or the first
+```` ```yaml ```` block of a Markdown note, so it can live in the vault:
+
+```yaml
+- frage: Wie verhindere ich, dass ein Agent manipulierte Anweisungen ausführt?
+  erwartet: [agent-safety, Sicherheitsarchitektur]
+- question: sovereign cloud requirements for public sector
+  expect: ["04 Resources/STACKIT/"]
+```
+
+`erwartet`/`expect` are path fragments (case-insensitive); versions folded
+into a hybrid hit as `variants` count too. `--k 5`, `--json`,
+`--include-restricted`.
+
 ## Tools
 
 | Tool | Description |

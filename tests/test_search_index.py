@@ -203,3 +203,29 @@ class TestReconcile:
         assert ix.reconcile(v.list_notes())["rebuilt"] is True
         assert ix.count() == 1 and [h["path"] for h in ix.search("Alpha")] == ["Notes/A.md"]
         assert ix.reconcile(v.list_notes())["rebuilt"] is False
+
+
+class TestStartupReconcile:
+    def test_reconcile_on_start_and_skip_when_fresh(self, indexed_vault, monkeypatch):
+        from obsidian_mcp.server import _start_reconcile
+
+        v, ix, root = indexed_vault
+        monkeypatch.setenv("OBSIDIAN_INDEX_DIR", str(ix.index_dir))
+        v._index = ix
+        (root / "Notes/Extern.md").write_text("# Extern\n\nVon Syncthing gebracht.", encoding="utf-8")
+        _start_reconcile(v, delay=(0, 0)).join(10)
+        assert [h["path"] for h in ix.search("Syncthing")] == ["Notes/Extern.md"]
+        assert ix.reconciled_within(60)
+        # a second process right after: stamp is fresh, nothing is read
+        (root / "Notes/Extern2.md").write_text("# Extern2\n\nNoch eine Syncthing-Notiz.", encoding="utf-8")
+        _start_reconcile(v, delay=(0, 0)).join(10)
+        assert [h["path"] for h in ix.search("Noch")] == []
+        monkeypatch.setenv("OBSIDIAN_INDEX_RECONCILE_MAX_AGE", "0")
+        _start_reconcile(v, delay=(0, 0)).join(10)
+        assert [h["path"] for h in ix.search("Noch")] == ["Notes/Extern2.md"]
+
+    def test_reconcile_on_start_can_be_disabled(self, indexed_vault, monkeypatch):
+        from obsidian_mcp.server import _start_reconcile
+
+        monkeypatch.setenv("OBSIDIAN_INDEX_RECONCILE", "0")
+        assert _start_reconcile(indexed_vault[0]) is None

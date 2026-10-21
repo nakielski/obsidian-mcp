@@ -1262,8 +1262,43 @@ def main() -> None:
     root = os.environ.get("OBSIDIAN_VAULT_ROOT", "")
     if not root:
         print("[obsidian-mcp] No OBSIDIAN_VAULT_ROOT set, using mock vault.", file=sys.stderr)
-    _get_vault()
+    _start_reconcile(_get_vault())
     mcp.run()
+
+
+def _start_reconcile(vault: Vault, delay: tuple[float, float] = (2.0, 20.0)):
+    """Reconcile the full-text index with the disk once, in the background.
+
+    Catches notes moved, edited or deleted while no server was running (file
+    sync, the Obsidian editor). Several server processes sharing one index
+    (e.g. one per agent profile) do this only once: a process skips when the
+    index was reconciled within OBSIDIAN_INDEX_RECONCILE_MAX_AGE seconds
+    (default 900, the interval of a typical sync loop). OBSIDIAN_INDEX_RECONCILE=0
+    turns it off. Never blocks or fails the server start.
+    """
+    if not policies._flag("OBSIDIAN_INDEX_RECONCILE"):
+        return None
+    import random
+    import threading
+    import time
+
+    max_age = float(os.environ.get("OBSIDIAN_INDEX_RECONCILE_MAX_AGE", "900"))
+
+    def run() -> None:
+        try:
+            time.sleep(random.uniform(*delay))  # spread processes started together
+            ix = vault._init_index()
+            if ix is None or ix.reconciled_within(max_age):
+                return
+            stats = ix.reconcile(vault.list_notes())
+            if stats["added"] or stats["updated"] or stats["removed"] or stats["rebuilt"]:
+                print(f"[obsidian-mcp] full-text index reconciled: {stats}", file=sys.stderr)
+        except Exception as e:  # pragma: no cover - best effort
+            print(f"[obsidian-mcp] index reconcile skipped: {type(e).__name__}: {e}", file=sys.stderr)
+
+    t = threading.Thread(target=run, name="index-reconcile", daemon=True)
+    t.start()
+    return t
 
 
 if __name__ == "__main__":
