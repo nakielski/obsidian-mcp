@@ -376,6 +376,7 @@ def test_eval_compares_fulltext_and_hybrid(env, tmp_path):
         "- frage: wo steht der pkw\n  erwartet: [Auto.md]\n"
         "- question: Geburtstag party\n  expect: Entwurf v0.1\n"
         "- frage: wer hat einen wagen\n  erwartet: [05 People/]\n"
+        "- frage: \n  erwartet: []\n"
         "```\n", encoding="utf-8")
     qs = load_questions(qfile)
     assert [q["id"] for q in qs] == [1, 2, 3, 4]

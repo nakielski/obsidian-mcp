@@ -50,9 +50,12 @@ def load_questions(path: str | Path) -> list[dict]:
         q = str(item.get("frage") or item.get("question") or item.get("q") or "").strip()
         exp = item.get("erwartet", item.get("expect", []))
         exp = [exp] if isinstance(exp, str) else list(exp or [])
+        exp = [e for e in exp if str(e or "").strip()]
+        if not q and not exp:
+            continue  # empty template row
         if not q or not exp:
             raise ValueError(f"entry {i}: frage and erwartet are required")
-        out.append({"id": i, "question": q, "expect": [str(e) for e in exp],
+        out.append({"id": len(out) + 1, "question": q, "expect": [str(e) for e in exp],
                     "note": str(item.get("notiz") or item.get("note") or "")})
     if not out:
         raise ValueError(f"{p}: no questions")
