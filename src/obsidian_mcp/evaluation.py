@@ -91,6 +91,7 @@ def run_eval(vault, questions: list[dict], k: int = 10, include_restricted: bool
             row["fulltext_rank"], row["fulltext_top"], row["fulltext_error"] = None, [], str(e)
         hy = hybrid_query(vault, q["question"], limit=k, include_restricted=include_restricted)
         row["hybrid_mode"] = hy["mode"]
+        row["hybrid_warning"] = hy.get("warning", "")
         row["hybrid_rank"] = first_rank(hy["results"], q["expect"])
         row["hybrid_top"] = [h["path"] for h in hy["results"][:3]]
         hit = next((h for h in hy["results"] if _matches(h["path"], q["expect"])
@@ -144,5 +145,7 @@ def to_markdown(result: dict) -> str:
         lines.append(f"| {r['id']} | {q} | {ft} | {hy} | {src} |")
     modes = {r["hybrid_mode"] for r in result["rows"]}
     if modes != {"hybrid"}:
+        warns = sorted({r.get("hybrid_warning", "") for r in result["rows"]} - {""})
         lines += ["", f"Achtung: hybrid_search lief nicht immer hybrid (mode: {', '.join(sorted(modes))})."]
+        lines += [f"Grund: {w}" for w in warns]
     return "\n".join(lines) + "\n"

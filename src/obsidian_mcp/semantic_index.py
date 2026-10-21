@@ -818,6 +818,10 @@ def cli(argv: list[str] | None = None) -> int:
     if args.cmd == "eval":
         from .evaluation import load_questions, run_eval, to_markdown
 
+        # This CLI is the semantic tool: hybrid_search must not silently fall
+        # back to full text because the server flag is missing in the shell.
+        os.environ.setdefault("OBSIDIAN_SEMANTIC", "1")
+
         result = run_eval(vault, load_questions(args.file), k=args.k,
                           include_restricted=args.include_restricted)
         print(json.dumps(result, indent=2, ensure_ascii=False) if args.json else to_markdown(result))
