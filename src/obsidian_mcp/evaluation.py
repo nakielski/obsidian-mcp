@@ -83,8 +83,8 @@ def _hit_rank(results: list[dict], expect: list[str]) -> tuple[int | None, list[
     return first_rank(results, expect), (hit["sources"] if hit else [])
 
 
-def _slim(hits: list[dict]) -> list[dict]:
-    return [{"path": h["path"], "title": h.get("title", ""), "uid": h.get("uid", "")} for h in hits]
+def _slim(hits: list[dict]) -> list[str]:
+    return [h["path"] for h in hits]  # paths are all the fusion needs
 
 
 def run_eval(vault, questions: list[dict], k: int = 10, include_restricted: bool = False,
@@ -163,7 +163,8 @@ def replay_eval(dump: dict, k: int | None = None) -> dict:
         row = {key: v for key, v in old.items() if key != "lists"}
         if k != dump["k"] and row.get("fulltext_rank") and row["fulltext_rank"] > k:
             row["fulltext_rank"] = None
-        results = [h for h in fuse(old["lists"], limit, cfg) if h["path"].casefold() not in skip][:k]
+        lists = {name: [{"path": p} for p in paths] for name, paths in old["lists"].items()}
+        results = [h for h in fuse(lists, limit, cfg) if h["path"].casefold() not in skip][:k]
         row["hybrid_rank"], row["hybrid_sources"] = _hit_rank(results, row["expect"])
         row["hybrid_top"] = [h["path"] for h in results[:3]]
         rows.append(row)

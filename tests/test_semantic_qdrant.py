@@ -455,7 +455,7 @@ def test_eval_dump_and_offline_replay(env, tmp_path, monkeypatch):
     res = run_eval(v, q, k=5, dump=True)
     lists = res["rows"][0]["lists"]
     assert set(lists) == {"fulltext", "all_terms", "semantic"} and lists["all_terms"]
-    assert set(lists["fulltext"][0]) == {"path", "title", "uid"}
+    assert all(isinstance(p, str) for p in lists["fulltext"])
     same = replay_eval(json.loads(json.dumps(res)))
     assert same["rows"][0]["hybrid_rank"] == res["rows"][0]["hybrid_rank"]
     assert same["rows"][0]["fulltext_rank"] == res["rows"][0]["fulltext_rank"]

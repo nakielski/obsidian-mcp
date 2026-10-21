@@ -859,7 +859,7 @@ def cli(argv: list[str] | None = None) -> int:
                           include_restricted=args.include_restricted, exclude_paths=exclude,
                           dump=bool(args.dump))
         if args.dump:
-            Path(args.dump).write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+            Path(args.dump).write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
             result = {key: v for key, v in result.items() if key != "dump"}
             result["rows"] = [{key: v for key, v in r.items() if key != "lists"} for r in result["rows"]]
         print(json.dumps(result, indent=2, ensure_ascii=False) if args.json else to_markdown(result))
