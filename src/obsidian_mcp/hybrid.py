@@ -186,9 +186,11 @@ def rrf_fuse(fulltext: list[dict], semantic: list[dict], limit: int, k: int = RR
     if reserve > 0 and limit > 1:
         keep: list[dict] = []
         for src in ("semantic", "fulltext"):
-            ranked = sorted((r for r in reps if best_rank[id(r)][src] and not r["demoted"]),
-                            key=lambda r: best_rank[id(r)][src])
-            keep += [r for r in ranked[: min(reserve, limit // 2)] if all(r is not x for x in keep)]
+            ranked = sorted((r for r in reps if best_rank[id(r)][src]), key=lambda r: best_rank[id(r)][src])
+            # the top ranks of this retriever; a demoted hit there forfeits its
+            # slot instead of handing it to a weaker hit further down
+            keep += [r for r in ranked[: min(reserve, limit // 2)]
+                     if not r["demoted"] and all(r is not x for x in keep)]
         for r in keep:
             if any(r is c for c in chosen):
                 continue

@@ -15,7 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `OBSIDIAN_SEARCH_DEMOTE` (folders or globs such as `raw/repos/*/*/`,
   default `**/node_modules/`) and `OBSIDIAN_SEARCH_DEMOTE_WEIGHT` (default
   0.5): mirrored third-party docs rank behind your own notes without being
-  hidden; hits are marked `demoted` and take no reserved slot.
+  hidden; hits are marked `demoted` and take no reserved slot. A demoted
+  hit among a retriever's top ranks forfeits its reserved slot instead of
+  pulling up a weaker hit further down.
 - `OBSIDIAN_HYBRID_CANDIDATES` (default 30): minimum list length per
   retriever before fusion. 60 and 100 measured worse.
 - `obsidian-mcp-semantic eval --dump OUT.json` stores the raw ranked lists;
