@@ -1129,6 +1129,8 @@ class HybridSearchItem(BaseModel):
     sources: list[str]
     fulltext_rank: int | None = None
     semantic_rank: int | None = None
+    all_terms_rank: int | None = None
+    demoted: bool = False
     variants: list[str] = []
 
 
@@ -1183,7 +1185,11 @@ def hybrid_search(
     means the semantic side was unavailable, see "warning"), "warning",
     "restricted_hidden" (true if restricted folders were excluded), "total",
     "results": [{path, title, heading (best matching section), snippet, uid,
-    tags, score, sources, fulltext_rank, semantic_rank, variants}]}.
+    tags, score, sources, fulltext_rank, semantic_rank, all_terms_rank, demoted,
+    variants}]}.
+    "all_terms_rank" is set when the note contains every word of the query.
+    "demoted": the note lies in a folder the owner ranks lower (e.g. mirrored
+    third-party docs); prefer the user's own notes when both answer the question.
     "variants" lists other versions/copies of the same note (drafts, archive
     copies) folded into this hit; read them only if the user asks for them.
     The best hits of each retriever are always included, so semantic-only

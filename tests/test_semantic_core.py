@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from obsidian_mcp import semantic_index as si
-from obsidian_mcp.hybrid import hybrid_query, make_snippet, rrf_fuse, variant_key
+from obsidian_mcp.hybrid import hybrid_query, make_snippet, path_matcher, rrf_fuse, variant_key
 from obsidian_mcp.semantic_index import (
     Embedder,
     EmbeddingError,
@@ -72,6 +72,20 @@ def test_config_from_env(monkeypatch):
     assert cfg.restricted == ("05 people/", "private/health/")
     assert cfg.exclude == (".trash/",)
     assert cfg.embed_url.endswith("/v1")
+
+
+def test_config_ranking_settings(monkeypatch):
+    for k in ("OBSIDIAN_SEARCH_DEMOTE", "OBSIDIAN_SEARCH_DEMOTE_WEIGHT", "OBSIDIAN_HYBRID_CANDIDATES"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = SemanticConfig.from_env()
+    assert cfg.demote == ("**/node_modules/",) and cfg.demote_weight == 0.5 and cfg.candidates == 30
+    monkeypatch.setenv("OBSIDIAN_SEARCH_DEMOTE", " raw/repos/*/*/ , Vendor ")
+    monkeypatch.setenv("OBSIDIAN_SEARCH_DEMOTE_WEIGHT", "3")
+    monkeypatch.setenv("OBSIDIAN_HYBRID_CANDIDATES", "60")
+    cfg = SemanticConfig.from_env()
+    assert cfg.demote == ("raw/repos/*/*/", "Vendor") and cfg.demote_weight == 1.0 and cfg.candidates == 60
+    monkeypatch.setenv("OBSIDIAN_SEARCH_DEMOTE", "")  # empty switches it off, default included
+    assert SemanticConfig.from_env().demote == ()
 
 
 def test_config_rejects_unknown_api(monkeypatch):
@@ -222,6 +236,73 @@ def test_fusion_reserve_never_exceeds_limit():
     assert len(rrf_fuse(ft, sem, limit=1)) == 1
     two = rrf_fuse(ft, sem, limit=2)
     assert {f["path"] for f in two} == {"s0.md", "f0.md"}
+
+
+@pytest.mark.parametrize("pattern,yes,no", [
+    ("05 People", ["05 People/Anna.md", "05 people/x/y.md"], ["05 Peoplex/a.md", "x/05 People/a.md"]),
+    ("raw/repos/*/*/", ["raw/repos/openclaw/docs/a.md", "raw/repos/x/y/z/a.md"],
+     ["raw/repos/hermes-agent/Eigene Notiz.md", "raw/conversations/a/b.md"]),
+    ("**/node_modules/", ["node_modules/a.md", "06 Archive/b/node_modules/zmq/README.md"],
+     ["06 Archive/node_modules.md", "a/node_modules_x/b.md"]),
+    ("raw/repos/*/docs", ["raw/repos/ollama/docs/api.md"], ["raw/repos/ollama/README.md"]),
+    ("04 Resources/Fragen*.md", ["04 Resources/Fragenset.md"], ["04 Resources/x/Fragenset.md"]),
+    ("a\\b\\", ["a/b/c.md"], ["a/bc.md"]),
+])
+def test_path_matcher_prefixes_and_globs(pattern, yes, no):
+    m = path_matcher([pattern])
+    assert all(m.match(p.casefold()) for p in yes)
+    assert not any(m.match(p.casefold()) for p in no)
+
+
+def test_path_matcher_empty():
+    assert path_matcher([]) is None and path_matcher([" ", ""]) is None
+
+
+def test_fusion_demotes_without_hiding():
+    mirror = "raw/repos/tool/docs/setup.md"
+    ft = [{"path": mirror}, {"path": "Notes/Eigenes Setup.md"}, {"path": "Notes/C.md"}]
+    sem = [{"path": mirror}, {"path": "Notes/Eigenes Setup.md"}]
+    plain = rrf_fuse(ft, sem, limit=10)
+    assert plain[0]["path"] == mirror and plain[0]["demoted"] is False
+    fused = rrf_fuse(ft, sem, limit=10, demote=("raw/repos/*/*/",))
+    assert [f["path"] for f in fused][:2] == ["Notes/Eigenes Setup.md", mirror]
+    assert fused[1]["demoted"] is True and fused[1]["score"] == round(0.5 * 2 / 61, 6)
+    gone = rrf_fuse(ft, sem, limit=10, demote=("raw/repos/",), demote_weight=0)
+    assert gone[-1]["path"] == mirror and gone[-1]["score"] == 0  # still listed, last
+
+
+def test_fusion_demoted_hits_take_no_reserved_slot():
+    both = [{"path": f"both{i}.md"} for i in range(12)]
+    sem = [{"path": "vendor/x/a.md"}, {"path": "sem1.md"}] + both
+    fused = rrf_fuse(both, sem, limit=10, demote=("vendor/",))
+    paths = [f["path"] for f in fused]
+    assert "sem1.md" in paths and "vendor/x/a.md" not in paths
+
+
+def test_fusion_all_terms_list_lifts_exact_matches():
+    # OR full text: one note repeats 'tailscale' often; the note with both words is 6th
+    ft = [{"path": f"tailscale{i}.md"} for i in range(5)] + [{"path": "Phase 0.md"}]
+    sem = list(ft)
+    before = [f["path"] for f in rrf_fuse(ft, sem, limit=10)]
+    after_hits = rrf_fuse(ft, sem, limit=10, all_terms=[{"path": "Phase 0.md"}])
+    after = [f["path"] for f in after_hits]
+    assert before.index("Phase 0.md") > 0 and after[0] == "Phase 0.md"
+    top = after_hits[0]
+    assert top["all_terms_rank"] == 1 and top["fulltext_rank"] == 6
+    assert top["sources"] == ["fulltext", "semantic"]
+
+
+def test_fusion_all_terms_hit_beyond_or_list_counts_as_fulltext():
+    fused = rrf_fuse([{"path": "a.md"}], [], limit=5, all_terms=[{"path": "b.md", "title": "B"}])
+    b = next(f for f in fused if f["path"] == "b.md")
+    assert b["sources"] == ["fulltext"] and b["fulltext_rank"] is None and b["title"] == "B"
+
+
+def test_fusion_fulltext_reserve_prefers_all_terms():
+    both = [{"path": f"both{i}.md"} for i in range(12)]
+    ft = list(both) + [{"path": "exact.md"}]
+    fused = rrf_fuse(ft, both, limit=10, reserve=1, all_terms=[{"path": "exact.md"}])
+    assert "exact.md" in [f["path"] for f in fused]
 
 
 def test_snippet_strips_markup_and_truncates():

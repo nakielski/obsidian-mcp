@@ -110,6 +110,9 @@ class SemanticConfig:
     exclude: tuple[str, ...] = ()
     restricted: tuple[str, ...] = ()
     secondary: tuple[str, ...] = ("06 archive", "raw")
+    demote: tuple[str, ...] = ("**/node_modules/",)
+    demote_weight: float = 0.5
+    candidates: int = 30
     max_chunk_chars: int = 2000
     backoff_seconds: float = 60.0
     min_score: float = 0.0
@@ -140,6 +143,10 @@ class SemanticConfig:
             restricted=_prefix_list("OBSIDIAN_SEARCH_RESTRICTED"),
             secondary=(_prefix_list("OBSIDIAN_SEARCH_SECONDARY")
                        if "OBSIDIAN_SEARCH_SECONDARY" in os.environ else ("06 archive", "raw")),
+            demote=(tuple(x.strip() for x in env("OBSIDIAN_SEARCH_DEMOTE", "").split(",") if x.strip())
+                    if "OBSIDIAN_SEARCH_DEMOTE" in os.environ else ("**/node_modules/",)),
+            demote_weight=min(max(float(env("OBSIDIAN_SEARCH_DEMOTE_WEIGHT", "0.5")), 0.0), 1.0),
+            candidates=max(10, int(env("OBSIDIAN_HYBRID_CANDIDATES", "30"))),
             max_chunk_chars=max(200, int(env("OBSIDIAN_SEMANTIC_CHUNK_CHARS", "2000"))),
             backoff_seconds=float(env("OBSIDIAN_SEMANTIC_BACKOFF", "60")),
             min_score=float(env("OBSIDIAN_SEMANTIC_MIN_SCORE", "0")),
@@ -784,6 +791,12 @@ class SemanticIndex:
 
 def cli(argv: list[str] | None = None) -> int:
     """obsidian-mcp-semantic status | sync [--max-seconds N] | eval FILE [--k N] [--json]
+    [--dump OUT.json] | eval DUMP.json --replay
+
+    eval --dump stores the raw ranked lists of every retriever; eval --replay
+    re-ranks such a dump offline with the current ranking settings
+    (OBSIDIAN_SEARCH_DEMOTE, OBSIDIAN_SEARCH_DEMOTE_WEIGHT, ...), so settings
+    can be compared without index, Qdrant or embedding backend.
 
     sync also reconciles the Whoosh full-text index with the files on disk
     (notes moved, edited or deleted outside the server).
@@ -799,11 +812,26 @@ def cli(argv: list[str] | None = None) -> int:
     p_eval = sub.add_parser("eval", help="compare search_query and hybrid_search on a question set "
                             "(YAML/JSON file or the first ```yaml block of a Markdown note)")
     p_eval.add_argument("file")
-    p_eval.add_argument("--k", type=int, default=10, help="top k per retriever (default 10)")
+    p_eval.add_argument("--k", type=int, default=None, help="top k per retriever (default 10; replay: as dumped)")
     p_eval.add_argument("--json", action="store_true", help="print JSON instead of Markdown")
     p_eval.add_argument("--include-restricted", action="store_true",
                         help="also search OBSIDIAN_SEARCH_RESTRICTED folders")
+    p_eval.add_argument("--dump", metavar="OUT", help="also write the raw ranked lists as JSON to OUT")
+    p_eval.add_argument("--replay", action="store_true",
+                        help="FILE is a --dump file: re-rank it with the current settings, offline")
     args = parser.parse_args(argv)
+
+    if args.cmd == "eval" and args.replay:
+        from .evaluation import replay_eval, to_markdown
+
+        try:
+            result = replay_eval(json.loads(Path(args.file).read_text(encoding="utf-8")),
+                                 k=args.k)
+        except (OSError, ValueError) as e:
+            print(f"replay: {e}", file=sys.stderr)
+            return 2
+        print(json.dumps(result, indent=2, ensure_ascii=False) if args.json else to_markdown(result))
+        return 0
 
     root = os.environ.get("OBSIDIAN_VAULT_ROOT", "")
     if not root:
@@ -827,8 +855,13 @@ def cli(argv: list[str] | None = None) -> int:
             exclude = (qpath.relative_to(Path(vault.root).resolve()).as_posix(),)
         except ValueError:
             exclude = ()
-        result = run_eval(vault, load_questions(args.file), k=args.k,
-                          include_restricted=args.include_restricted, exclude_paths=exclude)
+        result = run_eval(vault, load_questions(args.file), k=args.k or 10,
+                          include_restricted=args.include_restricted, exclude_paths=exclude,
+                          dump=bool(args.dump))
+        if args.dump:
+            Path(args.dump).write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+            result = {key: v for key, v in result.items() if key != "dump"}
+            result["rows"] = [{key: v for key, v in r.items() if key != "lists"} for r in result["rows"]]
         print(json.dumps(result, indent=2, ensure_ascii=False) if args.json else to_markdown(result))
         return 0
     index = SemanticIndex(vault.root)

@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `hybrid_search` ranks notes containing every query word higher: queries of
+  two or more words also run the full text with AND, and that list counts in
+  the fusion (`all_terms_rank`). Keyword queries no longer lose to notes that
+  repeat one word often; everyday-language questions are unaffected.
+- `OBSIDIAN_SEARCH_DEMOTE` (folders or globs such as `raw/repos/*/*/`,
+  default `**/node_modules/`) and `OBSIDIAN_SEARCH_DEMOTE_WEIGHT` (default
+  0.5): mirrored third-party docs rank behind your own notes without being
+  hidden; hits are marked `demoted` and take no reserved slot.
+- `OBSIDIAN_HYBRID_CANDIDATES` (default 30): minimum list length per
+  retriever before fusion.
+- `obsidian-mcp-semantic eval --dump OUT.json` stores the raw ranked lists;
+  `eval OUT.json --replay` re-ranks them offline with the current ranking
+  settings. Reports name the settings they ran with.
 - `obsidian-mcp-semantic eval FILE`: compares `search_query` and `hybrid_search`
   on a question set (YAML/JSON or a ```yaml block in a vault note) and reports
   hit@1/@5/@k, MRR and per-question ranks as Markdown or JSON.

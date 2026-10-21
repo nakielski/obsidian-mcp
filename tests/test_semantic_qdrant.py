@@ -424,3 +424,70 @@ def test_eval_never_counts_the_question_note(env):
     assert any(p.startswith("Eval/") for p in with_note["hybrid_top"])
     assert not any(p.startswith("Eval/") for p in without["hybrid_top"] + without["fulltext_top"])
     assert without["hybrid_rank"] == 1
+
+
+def test_hybrid_ranks_notes_with_all_words_first_and_marks_demoted(env, monkeypatch):
+    v, sx, emb = env
+    monkeypatch.setenv("OBSIDIAN_SEARCH_DEMOTE", "Vendor/*/")
+    for i in range(4):
+        v.create(f"Notes/Netz {i}.md", f"# Netz {i}\n\nTailscale Tailscale Tailscale Notiz {i}.")
+    v.create("Notes/Phase 0.md", "# Phase 0\n\nDie Tailscale ACL regelt den Zugriff.")
+    v.create("Vendor/tool/ACL.md", "# ACL\n\nTailscale ACL reference, Tailscale ACL syntax.")
+    res = hybrid_query(v, "Tailscale ACL", limit=6)
+    paths = [r["path"] for r in res["results"]]
+    assert paths[0] == "Notes/Phase 0.md"
+    first = res["results"][0]
+    assert first["all_terms_rank"] is not None and first["demoted"] is False
+    vendor = next(r for r in res["results"] if r["path"] == "Vendor/tool/ACL.md")
+    assert vendor["demoted"] is True and vendor["all_terms_rank"] is not None
+    one_word = hybrid_query(v, "Tailscale", limit=6)["results"]  # single word: no AND list
+    assert all(r["all_terms_rank"] is None for r in one_word)
+
+
+def test_eval_dump_and_offline_replay(env, tmp_path, monkeypatch):
+    from obsidian_mcp.evaluation import replay_eval, run_eval, to_markdown
+
+    v, sx, emb = env
+    monkeypatch.setenv("OBSIDIAN_SEARCH_DEMOTE", "")
+    v.create("Mirror/tool/Garage.md", "# Garage\n\nGarage Tor Garage Tor Anleitung.")
+    v.create("Notes/Garage.md", "# Unsere Garage\n\nDas Garage Tor klemmt.")
+    q = [{"id": 1, "question": "Garage Tor", "expect": ["Notes/Garage"], "note": ""}]
+    res = run_eval(v, q, k=5, dump=True)
+    lists = res["rows"][0]["lists"]
+    assert set(lists) == {"fulltext", "all_terms", "semantic"} and lists["all_terms"]
+    assert set(lists["fulltext"][0]) == {"path", "title", "uid"}
+    same = replay_eval(json.loads(json.dumps(res)))
+    assert same["rows"][0]["hybrid_rank"] == res["rows"][0]["hybrid_rank"]
+    assert same["rows"][0]["fulltext_rank"] == res["rows"][0]["fulltext_rank"]
+    monkeypatch.setenv("OBSIDIAN_SEARCH_DEMOTE", "Mirror/")
+    monkeypatch.setenv("OBSIDIAN_SEARCH_DEMOTE_WEIGHT", "0")
+    demoted = replay_eval(res)
+    assert demoted["rows"][0]["hybrid_rank"] == 1
+    assert demoted["settings"]["demote"] == ["Mirror/"]
+    md = to_markdown(demoted)
+    assert "Nachgerechnet mit: zurückgestuft `Mirror/` (Faktor 0.0)" in md
+    with pytest.raises(ValueError, match="dump"):
+        replay_eval(run_eval(v, q, k=5))
+
+
+def test_eval_cli_dump_then_replay(env, tmp_path, monkeypatch, capsys):
+    from obsidian_mcp.semantic_index import cli
+
+    v, sx, emb = env
+    v.create("Notes/Garage.md", "# Garage\n\nDas Garage Tor klemmt.")
+    qfile = tmp_path / "q.yaml"
+    qfile.write_text("- frage: Garage Tor\n  erwartet: [Notes/Garage]\n", encoding="utf-8")
+    dump = tmp_path / "dump.json"
+    monkeypatch.setenv("OBSIDIAN_VAULT_ROOT", str(v.root))
+    import obsidian_mcp.vault as vault_mod
+
+    monkeypatch.setattr(vault_mod.Vault, "_init_semantic", lambda self: sx)
+    assert cli(["eval", str(qfile), "--dump", str(dump)]) == 0
+    out = capsys.readouterr().out
+    assert "Einstellungen: zurückgestuft" in out and dump.is_file()
+    assert "lists" in json.loads(dump.read_text(encoding="utf-8"))["rows"][0]
+    monkeypatch.delenv("OBSIDIAN_VAULT_ROOT")  # replay needs no vault
+    assert cli(["eval", str(dump), "--replay", "--json"]) == 0
+    replayed = json.loads(capsys.readouterr().out)
+    assert replayed["rows"][0]["hybrid_rank"] == 1 and "replay" in replayed
+    assert cli(["eval", str(qfile), "--replay"]) == 2

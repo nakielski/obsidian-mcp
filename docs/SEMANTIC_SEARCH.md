@@ -45,6 +45,9 @@ Environment:
 | `OBSIDIAN_EMBED_QUERY_PREFIX` / `OBSIDIAN_EMBED_DOC_PREFIX` | empty | Instruction prefixes for models that need them (e.g. E5, Qwen3-Embedding) |
 | `OBSIDIAN_SEARCH_RESTRICTED` | empty | Comma-separated folders hidden from `hybrid_search` and all other search, listing and graph tools unless `include_restricted=true` (still embedded and indexed) |
 | `OBSIDIAN_SEARCH_SECONDARY` | `06 Archive,raw` | Folders holding archived copies and raw records: when several variants of a note match, a copy outside these folders is shown first (nothing is hidden). Set empty to disable |
+| `OBSIDIAN_SEARCH_DEMOTE` | `**/node_modules/` | Comma-separated folders or globs ranked lower in `hybrid_search`, e.g. mirrored third-party docs: `raw/repos/*/*/` (`*` = one folder level, `**` = any depth, a pattern ending in `.md` = one note). Hits stay findable and are marked `demoted`. Setting the variable replaces the default; empty disables |
+| `OBSIDIAN_SEARCH_DEMOTE_WEIGHT` | `0.5` | Score factor for demoted hits (0–1); `0` puts them behind everything else |
+| `OBSIDIAN_HYBRID_CANDIDATES` | `30` | Minimum list length per retriever before fusion (at least 3 × `limit`) |
 | `OBSIDIAN_SEMANTIC_EXCLUDE` | empty | Comma-separated folders that are never embedded |
 | `OBSIDIAN_SEMANTIC_MIN_SCORE` | `0` (off) | Drop vector hits below this cosine similarity; tune per model |
 | `OBSIDIAN_SEMANTIC_CHUNK_CHARS` | `2000` | Max characters per chunk |
@@ -102,10 +105,20 @@ index created before this version is rebuilt once on the first sync.
   timeout. Such a batch is split in halves until it fits; only a single
   section that still times out counts as a failure (raise
   `OBSIDIAN_EMBED_TIMEOUT` then). Connection errors are not split.
-- **Fusion**: `score = Σ 1 / (60 + rank)` over both lists. A note found by
+- **Fusion**: `score = Σ 1 / (60 + rank)` over the lists. A note found by
   both retrievers ranks above one found by a single retriever at the same
   rank. Natural-language questions use OR semantics on the full-text side.
-  Two corrections on top:
+  Corrections on top:
+  - *All words*: for queries of two or more words the full text runs a
+    second time with every word required (AND), and that list counts as a
+    third one. For keyword queries such as `Tailscale ACL` a note containing
+    both words beats a note that repeats one of them often; hits carry
+    `all_terms_rank`. Questions in everyday language rarely contain all their
+    words in one note, then the list is empty and changes nothing.
+  - *Demotion*: hits in `OBSIDIAN_SEARCH_DEMOTE` count with
+    `OBSIDIAN_SEARCH_DEMOTE_WEIGHT` and never take a reserved slot. Mirrored
+    manuals then stop crowding out your own notes on the same topic, and are
+    still listed when nothing better matches.
   - *Reserve*: the three best hits of each retriever are always in the
     result. Plain RRF lets any note found by both lists (even a loose word
     match at rank 30) beat the best semantic-only match, so for a question
@@ -136,7 +149,21 @@ rank of the first expected note. The question set is YAML/JSON, or the first
 
 `erwartet`/`expect` are path fragments (case-insensitive); versions folded
 into a hybrid hit as `variants` count too. `--k 5`, `--json`,
-`--include-restricted`.
+`--include-restricted`. The report names the ranking settings it ran with.
+
+Comparing settings without re-running the searches:
+
+```bash
+obsidian-mcp-semantic eval Fragen.md --dump /tmp/eval-dump.json    # once, with index and Qdrant
+OBSIDIAN_SEARCH_DEMOTE="raw/repos/*/*/" OBSIDIAN_SEARCH_DEMOTE_WEIGHT=0.3 \
+  obsidian-mcp-semantic eval /tmp/eval-dump.json --replay           # offline, any machine
+```
+
+`--dump` stores the raw ranked lists of every retriever (100 per list);
+`--replay` fuses them again with the current `OBSIDIAN_SEARCH_DEMOTE`,
+`OBSIDIAN_SEARCH_DEMOTE_WEIGHT`, `OBSIDIAN_HYBRID_CANDIDATES` and
+`OBSIDIAN_SEARCH_SECONDARY` and prints the same report. Full-text ranks are
+taken over from the dump.
 
 ## Tools
 
