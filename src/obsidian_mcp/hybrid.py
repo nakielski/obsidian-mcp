@@ -40,6 +40,14 @@ def variant_key(path: str) -> str:
     return " ".join(words)
 
 
+def _recency(path: str) -> tuple:
+    """(version, date) from a file name: 'Entwurf v0.7 2026-10-20' -> ((0, 7), '2026-10-20')."""
+    stem = path.rsplit("/", 1)[-1].lower()
+    versions = [tuple(int(x) for x in m.group(0)[1:].split(".")) for m in _VERSION_RE.finditer(stem)]
+    dates = _DATE_RE.findall(stem)
+    return (max(versions) if versions else (), max(dates) if dates else "")
+
+
 def _is_secondary(path: str, secondary: tuple[str, ...]) -> bool:
     low = path.lower()
     return any(low == f.lower().strip("/") or low.startswith(f.lower().strip("/") + "/") for f in secondary)
@@ -53,8 +61,9 @@ def rrf_fuse(fulltext: list[dict], semantic: list[dict], limit: int, k: int = RR
        score calibration between BM25 and cosine similarity; a note found by
        both retrievers outranks one found by a single retriever at the same rank.
     2. Variants: versions and copies of one note (see ``variant_key``) count as
-       one hit. The live copy represents the group (not one in a ``secondary``
-       folder such as the archive, if there is one); the others are listed in
+       one hit. The newest live copy represents the group (highest version,
+       then date in the file name; a copy outside the ``secondary`` folders
+       such as the archive wins if there is one); the others are listed in
        ``variants``. Otherwise five drafts of one text fill five of ten slots.
     3. Reserve: the ``reserve`` best groups of each retriever are always in the
        result. With k=60 any note found by both lists (even at rank 30 of a
@@ -93,8 +102,9 @@ def rrf_fuse(fulltext: list[dict], semantic: list[dict], limit: int, k: int = RR
     reps: list[dict] = []
     best_rank: dict[int, dict[str, int]] = {}
     for members in groups.values():
-        live = [m for m in members if not _is_secondary(m["path"], secondary)]
-        rep = dict((live or members)[0])
+        live = [m for m in members if not _is_secondary(m["path"], secondary)] or members
+        # newest version (then date) represents the group; score breaks ties
+        rep = dict(max(live, key=lambda m: (_recency(m["path"]), m["score"])))
         rep["score"] = members[0]["score"]  # best member decides the rank; copies add nothing
         rep["variants"] = [m["path"] for m in members if m["path"] != rep["path"]]
         reps.append(rep)

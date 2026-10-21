@@ -189,6 +189,18 @@ def test_fusion_folds_variants_and_prefers_live_copy():
     assert fused[0]["score"] == round(1 / 61, 6)  # best member's score, copies add nothing
 
 
+def test_fusion_newest_live_variant_represents_group():
+    ft = [{"path": "Projekte/Artikel Entwurf v0.6 2026-10-19.md"},
+          {"path": "06 Archive/Artikel Entwurf v0.7 2026-10-20.md"},
+          {"path": "Projekte/Artikel Entwurf v0.7 2026-10-20.md"},
+          {"path": "Projekte/Artikel Entwurf v0.10 2026-10-22.md"}]
+    fused = rrf_fuse(ft, [], limit=5)
+    assert len(fused) == 1
+    assert fused[0]["path"] == "Projekte/Artikel Entwurf v0.10 2026-10-22.md"  # 0.10 > 0.7
+    assert fused[0]["score"] == round(1 / 61, 6)
+    assert len(fused[0]["variants"]) == 3
+
+
 def test_fusion_reserves_top_hits_of_each_retriever():
     # 12 notes found by both lists (loose OR full text) vs. semantic-only top hits
     both = [{"path": f"both{i}.md"} for i in range(12)]
