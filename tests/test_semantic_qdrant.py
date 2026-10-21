@@ -399,3 +399,14 @@ def test_load_questions_rejects_incomplete_entries(tmp_path):
     f.write_text("- frage: ohne Erwartung\n", encoding="utf-8")
     with pytest.raises(ValueError, match="erwartet"):
         load_questions(f)
+
+
+def test_eval_report_names_the_fallback_reason(env, tmp_path):
+    from obsidian_mcp.evaluation import run_eval, to_markdown
+
+    v, sx, emb = env
+    v.create("Notes/Auto.md", "# Auto\n\nMein Auto.")
+    emb.fail = True
+    v.create("Notes/B.md", "# B\n\nB.")  # write fails -> backend marked down
+    md = to_markdown(run_eval(v, [{"id": 1, "question": "Auto", "expect": ["Auto"], "note": ""}], k=5))
+    assert "lief nicht immer hybrid" in md and "Grund: semantic search paused" in md
