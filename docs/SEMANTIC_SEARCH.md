@@ -44,6 +44,7 @@ Environment:
 | `OBSIDIAN_EMBED_API_KEY` | – | Bearer token for OpenAI-compatible endpoints |
 | `OBSIDIAN_EMBED_QUERY_PREFIX` / `OBSIDIAN_EMBED_DOC_PREFIX` | empty | Instruction prefixes for models that need them (e.g. E5, Qwen3-Embedding) |
 | `OBSIDIAN_SEARCH_RESTRICTED` | empty | Comma-separated folders hidden from `hybrid_search` unless `include_restricted=true` (still embedded) |
+| `OBSIDIAN_SEARCH_SECONDARY` | `06 Archive,raw` | Folders holding archived copies and raw records: when several variants of a note match, a copy outside these folders is shown first (nothing is hidden). Set empty to disable |
 | `OBSIDIAN_SEMANTIC_EXCLUDE` | empty | Comma-separated folders that are never embedded |
 | `OBSIDIAN_SEMANTIC_MIN_SCORE` | `0` (off) | Drop vector hits below this cosine similarity; tune per model |
 | `OBSIDIAN_SEMANTIC_CHUNK_CHARS` | `2000` | Max characters per chunk |
@@ -97,6 +98,18 @@ are derived from path and content, so concurrent writers converge.
 - **Fusion**: `score = Σ 1 / (60 + rank)` over both lists. A note found by
   both retrievers ranks above one found by a single retriever at the same
   rank. Natural-language questions use OR semantics on the full-text side.
+  Two corrections on top:
+  - *Reserve*: the three best hits of each retriever are always in the
+    result. Plain RRF lets any note found by both lists (even a loose word
+    match at rank 30) beat the best semantic-only match, so for a question
+    phrased in other words than the notes the most relevant hits could
+    vanish.
+  - *Variants*: versions and copies of one note count as one hit. File names
+    are compared without folder, dates and version numbers
+    (`Entwurf v0.3 (2026-10-18)` and `Entwurf v0.6 2026-10-19` are one note);
+    generic names such as `index.md` or `SKILL.md` are never merged. A copy
+    outside the `OBSIDIAN_SEARCH_SECONDARY` folders represents the group, the
+    rest is listed in `variants`.
 
 ## Tools
 

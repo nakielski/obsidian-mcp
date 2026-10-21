@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is never imported.
 
 ### Fixed
+- `hybrid_search` buried the best semantic matches of natural-language questions:
+  with RRF (k=60) any note found by both retrievers - even a loose OR word
+  match at rank 30 - outranked the best note found by meaning only. The three
+  best hits of each retriever are now always part of the result.
+- `hybrid_search` folds versions and copies of one note (drafts, archive
+  copies, raw records) into one hit with a `variants` list, preferring a copy
+  outside `OBSIDIAN_SEARCH_SECONDARY` (default `06 Archive,raw`).
 - Semantic sync on a slow (CPU-only) embedding server: an embedding request that
   times out is split in halves and retried down to a single section, so long
   notes no longer fail as a whole. Default `OBSIDIAN_EMBED_BATCH` lowered from
