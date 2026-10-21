@@ -410,3 +410,17 @@ def test_eval_report_names_the_fallback_reason(env, tmp_path):
     v.create("Notes/B.md", "# B\n\nB.")  # write fails -> backend marked down
     md = to_markdown(run_eval(v, [{"id": 1, "question": "Auto", "expect": ["Auto"], "note": ""}], k=5))
     assert "lief nicht immer hybrid" in md and "Grund: semantic search paused" in md
+
+
+def test_eval_never_counts_the_question_note(env):
+    from obsidian_mcp.evaluation import run_eval
+
+    v, sx, emb = env
+    v.create("Notes/Antwort.md", "# Antwort\n\nDie Garage steht hinten.")
+    v.create("Eval/Fragen.md", "# Fragen\n\n- frage: Garage hinten\n  erwartet: [Notes/Antwort, Eval/]\n")
+    q = [{"id": 1, "question": "Garage hinten", "expect": ["Eval/", "Notes/Antwort"], "note": ""}]
+    with_note = run_eval(v, q, k=5)["rows"][0]
+    without = run_eval(v, q, k=5, exclude_paths=("Eval/Fragen.md",))["rows"][0]
+    assert any(p.startswith("Eval/") for p in with_note["hybrid_top"])
+    assert not any(p.startswith("Eval/") for p in without["hybrid_top"] + without["fulltext_top"])
+    assert without["hybrid_rank"] == 1

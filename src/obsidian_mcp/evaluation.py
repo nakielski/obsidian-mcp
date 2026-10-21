@@ -74,22 +74,32 @@ def first_rank(hits: list[dict], expect: list[str]) -> int | None:
     return None
 
 
-def run_eval(vault, questions: list[dict], k: int = 10, include_restricted: bool = False) -> dict:
+def run_eval(vault, questions: list[dict], k: int = 10, include_restricted: bool = False,
+             exclude_paths: tuple[str, ...] = ()) -> dict:
+    """``exclude_paths``: vault-relative paths never counted as hits, typically the
+    question note itself (it contains every question, so it matches all of them)."""
     from . import policies
     from .hybrid import hybrid_query
 
     hidden = () if include_restricted else policies.restricted_prefixes()
     ix = vault._init_index()
+    skip = {p.replace("\\", "/").casefold() for p in exclude_paths}
+
+    def keep(hits):
+        return [h for h in hits if h.get("path", "").casefold() not in skip][:k]
+
+    extra = len(skip)
     rows = []
     for q in questions:
         row = dict(q)
         try:
-            ft = ix.search(q["question"], limit=k, exclude_prefixes=hidden) if ix is not None else []
+            ft = keep(ix.search(q["question"], limit=k + extra, exclude_prefixes=hidden)) if ix is not None else []
             row["fulltext_rank"] = first_rank(ft, q["expect"])
             row["fulltext_top"] = [h["path"] for h in ft[:3]]
         except Exception as e:  # e.g. query syntax
             row["fulltext_rank"], row["fulltext_top"], row["fulltext_error"] = None, [], str(e)
-        hy = hybrid_query(vault, q["question"], limit=k, include_restricted=include_restricted)
+        hy = hybrid_query(vault, q["question"], limit=k + extra, include_restricted=include_restricted)
+        hy["results"] = keep(hy["results"])
         row["hybrid_mode"] = hy["mode"]
         row["hybrid_warning"] = hy.get("warning", "")
         row["hybrid_rank"] = first_rank(hy["results"], q["expect"])
