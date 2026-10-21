@@ -5,7 +5,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![MCP](https://img.shields.io/badge/MCP-1.0+-green.svg)](https://modelcontextprotocol.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests: 352](https://img.shields.io/badge/tests-352-brightgreen.svg)](#development)
+[![Tests: 444](https://img.shields.io/badge/tests-444-brightgreen.svg)](#development)
 
 ## Why?
 
@@ -190,7 +190,7 @@ MCP Client  ←—MCP stdio—→  obsidian-mcp server  →  vault.py  →  Obsi
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/       # 352 tests, all passing
+pytest tests/       # 444 tests, all passing
 ```
 
 CI runs on Python 3.10, 3.11, and 3.12 with `pytest` + `ruff`.

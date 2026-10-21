@@ -74,13 +74,32 @@ def first_rank(hits: list[dict], expect: list[str]) -> int | None:
     return None
 
 
-def run_eval(vault, questions: list[dict], k: int = 10, include_restricted: bool = False,
-             exclude_paths: tuple[str, ...] = ()) -> dict:
-    """``exclude_paths``: vault-relative paths never counted as hits, typically the
-    question note itself (it contains every question, so it matches all of them)."""
-    from . import policies
-    from .hybrid import hybrid_query
+DUMP_CANDIDATES = 100  # list length stored by --dump, enough to replay larger settings
 
+
+def _hit_rank(results: list[dict], expect: list[str]) -> tuple[int | None, list[str]]:
+    hit = next((h for h in results if _matches(h["path"], expect)
+                or any(_matches(v, expect) for v in h.get("variants") or [])), None)
+    return first_rank(results, expect), (hit["sources"] if hit else [])
+
+
+def _slim(hits: list[dict]) -> list[str]:
+    return [h["path"] for h in hits]  # paths are all the fusion needs
+
+
+def run_eval(vault, questions: list[dict], k: int = 10, include_restricted: bool = False,
+             exclude_paths: tuple[str, ...] = (), dump: bool = False) -> dict:
+    """``exclude_paths``: vault-relative paths never counted as hits, typically the
+    question note itself (it contains every question, so it matches all of them).
+
+    ``dump``: also store the raw ranked lists of every retriever per question
+    (``lists``), so ``replay_eval`` can re-rank them offline with other settings.
+    """
+    from . import policies
+    from .hybrid import candidate_count, collect, fuse
+    from .semantic_index import SemanticConfig
+
+    cfg = SemanticConfig.from_env()
     hidden = () if include_restricted else policies.restricted_prefixes()
     ix = vault._init_index()
     skip = {p.replace("\\", "/").casefold() for p in exclude_paths}
@@ -89,26 +108,68 @@ def run_eval(vault, questions: list[dict], k: int = 10, include_restricted: bool
         return [h for h in hits if h.get("path", "").casefold() not in skip][:k]
 
     extra = len(skip)
+    limit = k + extra
     rows = []
     for q in questions:
         row = dict(q)
         try:
-            ft = keep(ix.search(q["question"], limit=k + extra, exclude_prefixes=hidden)) if ix is not None else []
+            ft = keep(ix.search(q["question"], limit=limit, exclude_prefixes=hidden)) if ix is not None else []
             row["fulltext_rank"] = first_rank(ft, q["expect"])
             row["fulltext_top"] = [h["path"] for h in ft[:3]]
         except Exception as e:  # e.g. query syntax
             row["fulltext_rank"], row["fulltext_top"], row["fulltext_error"] = None, [], str(e)
-        hy = hybrid_query(vault, q["question"], limit=k + extra, include_restricted=include_restricted)
-        hy["results"] = keep(hy["results"])
-        row["hybrid_mode"] = hy["mode"]
-        row["hybrid_warning"] = hy.get("warning", "")
-        row["hybrid_rank"] = first_rank(hy["results"], q["expect"])
-        row["hybrid_top"] = [h["path"] for h in hy["results"][:3]]
-        hit = next((h for h in hy["results"] if _matches(h["path"], q["expect"])
-                    or any(_matches(v, q["expect"]) for v in h.get("variants") or [])), None)
-        row["hybrid_sources"] = hit["sources"] if hit else []
+        fetch = max(DUMP_CANDIDATES, candidate_count(limit, cfg)) if dump else None
+        lists = collect(vault, q["question"], limit, "", include_restricted, cfg, candidates=fetch)
+        if not lists["ft_ok"] and not lists["sem_ok"]:
+            raise RuntimeError("No search backend available: " + "; ".join(lists["warnings"]))
+        results = keep(fuse(lists, limit, cfg))
+        row["hybrid_mode"] = ("hybrid" if lists["ft_ok"] and lists["sem_ok"]
+                              else "semantic" if lists["sem_ok"] else "fulltext")
+        row["hybrid_warning"] = "; ".join(lists["warnings"])
+        row["hybrid_rank"], row["hybrid_sources"] = _hit_rank(results, q["expect"])
+        row["hybrid_top"] = [h["path"] for h in results[:3]]
+        if dump:
+            row["lists"] = {name: _slim(lists[name]) for name in ("fulltext", "all_terms", "semantic")}
         rows.append(row)
-    return {"k": k, "questions": len(rows), "summary": summarize(rows, k), "rows": rows}
+    out = {"k": k, "questions": len(rows), "summary": summarize(rows, k), "rows": rows,
+           "settings": settings(cfg)}
+    if dump:
+        out["dump"] = {"exclude_paths": sorted(skip)}
+    return out
+
+
+def settings(cfg) -> dict:
+    """The ranking settings a run used (printed with every report)."""
+    return {"demote": list(cfg.demote), "demote_weight": cfg.demote_weight,
+            "candidates": cfg.candidates, "secondary": list(cfg.secondary)}
+
+
+def replay_eval(dump: dict, k: int | None = None) -> dict:
+    """Re-rank the stored lists of an ``eval --dump`` file with the current
+    settings (OBSIDIAN_SEARCH_DEMOTE, ..._WEIGHT, OBSIDIAN_HYBRID_CANDIDATES,
+    OBSIDIAN_SEARCH_SECONDARY) - no index, no Qdrant, no Ollama needed.
+    Full-text ranks are taken over from the dump unchanged."""
+    from .hybrid import fuse
+    from .semantic_index import SemanticConfig
+
+    if "dump" not in dump or not all("lists" in r for r in dump.get("rows", [])):
+        raise ValueError("not an eval dump (run eval with --dump first)")
+    cfg = SemanticConfig.from_env()
+    k = k or dump["k"]
+    skip = set(dump["dump"].get("exclude_paths") or [])
+    limit = k + len(skip)
+    rows = []
+    for old in dump["rows"]:
+        row = {key: v for key, v in old.items() if key != "lists"}
+        if k != dump["k"] and row.get("fulltext_rank") and row["fulltext_rank"] > k:
+            row["fulltext_rank"] = None
+        lists = {name: [{"path": p} for p in paths] for name, paths in old["lists"].items()}
+        results = [h for h in fuse(lists, limit, cfg) if h["path"].casefold() not in skip][:k]
+        row["hybrid_rank"], row["hybrid_sources"] = _hit_rank(results, row["expect"])
+        row["hybrid_top"] = [h["path"] for h in results[:3]]
+        rows.append(row)
+    return {"k": k, "questions": len(rows), "summary": summarize(rows, k), "rows": rows,
+            "settings": settings(cfg), "replay": {"dump_settings": dump.get("settings", {})}}
 
 
 def summarize(rows: list[dict], k: int) -> dict:
@@ -125,6 +186,16 @@ def summarize(rows: list[dict], k: int) -> dict:
     out["only_hybrid"] = sum(1 for r in rows if r["hybrid_rank"] and not r["fulltext_rank"])
     out["only_fulltext"] = sum(1 for r in rows if r["fulltext_rank"] and not r["hybrid_rank"])
     return out
+
+
+def _settings_line(result: dict) -> list[str]:
+    st = result.get("settings")
+    if not st:
+        return []
+    demote = ", ".join(f"`{d}`" for d in st["demote"]) or "–"
+    label = "Nachgerechnet mit" if "replay" in result else "Einstellungen"
+    return [f"{label}: zurückgestuft {demote} (Faktor {st['demote_weight']}), "
+            f"Kandidaten je Liste ≥ {st['candidates']}", ""]
 
 
 def to_markdown(result: dict) -> str:
@@ -144,6 +215,7 @@ def to_markdown(result: dict) -> str:
         f"Nur Hybrid findet: {s['only_hybrid']} · nur Volltext findet: {s['only_fulltext']} "
         f"· Fragen: {result['questions']}",
         "",
+        *_settings_line(result),
         "| # | Frage | Volltext | Hybrid | Quellen (Hybrid) |",
         "|---|---|---|---|---|",
     ]
