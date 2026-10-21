@@ -43,7 +43,7 @@ Environment:
 | `OBSIDIAN_EMBED_MODEL` | `bge-m3` | Embedding model |
 | `OBSIDIAN_EMBED_API_KEY` | – | Bearer token for OpenAI-compatible endpoints |
 | `OBSIDIAN_EMBED_QUERY_PREFIX` / `OBSIDIAN_EMBED_DOC_PREFIX` | empty | Instruction prefixes for models that need them (e.g. E5, Qwen3-Embedding) |
-| `OBSIDIAN_SEARCH_RESTRICTED` | empty | Comma-separated folders hidden from `hybrid_search` unless `include_restricted=true` (still embedded) |
+| `OBSIDIAN_SEARCH_RESTRICTED` | empty | Comma-separated folders hidden from `hybrid_search` and all other search, listing and graph tools unless `include_restricted=true` (still embedded and indexed) |
 | `OBSIDIAN_SEARCH_SECONDARY` | `06 Archive,raw` | Folders holding archived copies and raw records: when several variants of a note match, a copy outside these folders is shown first (nothing is hidden). Set empty to disable |
 | `OBSIDIAN_SEMANTIC_EXCLUDE` | empty | Comma-separated folders that are never embedded |
 | `OBSIDIAN_SEMANTIC_MIN_SCORE` | `0` (off) | Drop vector hits below this cosine similarity; tune per model |

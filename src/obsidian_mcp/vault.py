@@ -463,11 +463,13 @@ class Vault:
                 continue
         return results
 
-    def search(self, query: str, limit: int = 100) -> list[Note]:
+    def search(self, query: str, limit: int = 100, exclude_prefixes: tuple[str, ...] = ()) -> list[Note]:
         """Case-insensitive substring search over titles and bodies.
 
         Bounded result set — an empty/broad query no longer returns the
-        entire vault (unbounded payload on large vaults).
+        entire vault (unbounded payload on large vaults). Notes under
+        ``exclude_prefixes`` (casefolded 'folder/') are skipped before the
+        limit applies.
         """
         if limit <= 0:
             raise ValueError("limit must be positive")
@@ -476,6 +478,8 @@ class Vault:
             return []
         out: list[Note] = []
         for n in self.list_notes():
+            if exclude_prefixes and policies.is_restricted(n.path, exclude_prefixes):
+                continue
             if q in n.title.lower() or q in n.content.lower():
                 out.append(n)
                 if len(out) >= limit:
@@ -912,29 +916,34 @@ class Vault:
             self._after_write(norm, "modify", load_note(p, self.root))
             return new_content, count
 
-    def get_backlinks(self, target_title: str) -> list[Note]:
+    def get_backlinks(self, target_title: str, exclude_prefixes: tuple[str, ...] = ()) -> list[Note]:
         """Find notes linking to target via [[wikilinks]], including embeds."""
         escaped = re.escape(target_title)
         pattern = re.compile(
             r"!?\[\[" + escaped + r"(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]",
             re.IGNORECASE,
         )
-        return [n for n in self.list_notes() if pattern.search(n.content)]
+        return [n for n in self.list_notes()
+                if not policies.is_restricted(n.path, exclude_prefixes) and pattern.search(n.content)]
 
     # ---- graph analytics ------------------------------------------------
 
-    def vault_graph(self) -> dict:
+    def vault_graph(self, exclude_prefixes: tuple[str, ...] = ()) -> dict:
         """Return the complete wikilink graph for the vault.
 
         Returns a dict with:
           - nodes: list of {path, title, tags}
           - edges: list of {source, target, target_exists}
           - stats: {total_notes, total_edges, orphan_count, broken_link_count}
+
+        Notes under ``exclude_prefixes`` are no nodes and no edge sources;
+        links pointing at them still count as existing (no false broken links).
         """
-        notes = self.list_notes()
+        all_notes = self.list_notes()
         title_map: dict[str, list[str]] = defaultdict(list)
-        for note in notes:
+        for note in all_notes:
             title_map[note.title.lower()].append(note.path)
+        notes = [n for n in all_notes if not policies.is_restricted(n.path, exclude_prefixes)]
 
         nodes = [
             {"path": note.path, "title": note.title, "tags": note.tags}
@@ -945,6 +954,8 @@ class Vault:
             for target in _extract_wikilinks(note.content):
                 target_exists = target.lower() in title_map
                 target_id = title_map[target.lower()][0] if target_exists else target
+                if target_exists and policies.is_restricted(target_id, exclude_prefixes):
+                    target_id = target  # link text only: do not reveal the hidden path
                 edges.append(
                     {
                         "source": note.path,
@@ -971,7 +982,7 @@ class Vault:
             },
         }
 
-    def find_orphans(self) -> list[Note]:
+    def find_orphans(self, exclude_prefixes: tuple[str, ...] = ()) -> list[Note]:
         """Return notes with no outgoing or incoming wikilinks."""
         graph = self.vault_graph()
         sources = {edge["source"] for edge in graph["edges"]}
@@ -980,6 +991,7 @@ class Vault:
             note
             for note in self.list_notes()
             if note.path not in sources and note.path not in targets
+            and not policies.is_restricted(note.path, exclude_prefixes)
         ]
 
     def get_outlinks(self, rel_path: str) -> list[str]:
@@ -994,12 +1006,17 @@ class Vault:
 
     # ---- health check ---------------------------------------------------
 
-    def vault_health(self) -> dict:
-        """Analyze vault health and return a structured report."""
-        notes = self.list_notes()
+    def vault_health(self, exclude_prefixes: tuple[str, ...] = ()) -> dict:
+        """Analyze vault health and return a structured report.
+
+        Notes under ``exclude_prefixes`` are not reported (links to them still
+        resolve, so they do not show up as broken links either).
+        """
+        all_notes = self.list_notes()
+        notes = [n for n in all_notes if not policies.is_restricted(n.path, exclude_prefixes)]
         total_notes = len(notes)
         title_map: dict[str, list[str]] = defaultdict(list)
-        for note in notes:
+        for note in all_notes:
             title_map[note.title.lower()].append(note.path)
 
         broken_links: list[dict] = []
@@ -1033,9 +1050,12 @@ class Vault:
                 if not exists:
                     broken_links.append({"path": note.path, "target": target})
 
+        visible_titles: dict[str, list[str]] = defaultdict(list)
+        for note in notes:
+            visible_titles[note.title.lower()].append(note.path)
         duplicate_titles = [
             {"title": title, "paths": paths}
-            for title, paths in title_map.items()
+            for title, paths in visible_titles.items()
             if len(paths) > 1
         ]
 

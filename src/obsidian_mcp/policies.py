@@ -78,6 +78,27 @@ class PolicyViolationError(Exception):
     """Raised when a write violates an enforced vault policy."""
 
 
+def restricted_prefixes() -> tuple[str, ...]:
+    """Folders hidden from search, listing and graph tools (OBSIDIAN_SEARCH_RESTRICTED).
+
+    Comma-separated, case-insensitive, whole folders: '05 People' covers
+    '05 People/...' but not '05 Peoplex/...'. Returned as casefolded prefixes
+    with a trailing slash. Empty when unset (default: nothing hidden).
+    Reading a note by its explicit path is never restricted.
+    """
+    out = []
+    for raw in os.environ.get("OBSIDIAN_SEARCH_RESTRICTED", "").split(","):
+        p = raw.strip().replace("\\", "/").strip("/")
+        if p:
+            out.append(p.casefold() + "/")
+    return tuple(out)
+
+
+def is_restricted(path: str, prefixes: tuple[str, ...]) -> bool:
+    low = path.replace("\\", "/").casefold()
+    return any(low.startswith(p) for p in prefixes)
+
+
 def _flag(name: str, default: str = "1") -> bool:
     return os.environ.get(name, default).strip().lower() not in {"0", "false", "no", "off"}
 

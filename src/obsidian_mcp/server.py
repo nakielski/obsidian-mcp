@@ -69,6 +69,35 @@ def _related_to_field():
     )
 
 
+def _include_restricted_field():
+    """Opt-in for restricted folders (one Field per tool)."""
+    return Field(
+        default=False,
+        description=(
+            "Also include folders the vault owner marked as restricted "
+            "(OBSIDIAN_SEARCH_RESTRICTED, e.g. a people folder). Only set true when "
+            "the user explicitly asked for that content. Default false."
+        ),
+    )
+
+
+def _hidden(include_restricted: bool, folder: str = "") -> tuple[str, ...]:
+    """Prefixes to hide for this call. An explicit folder inside a restricted
+    area counts as an explicit request, like read_note with a path."""
+    if include_restricted:
+        return ()
+    prefixes = policies.restricted_prefixes()
+    if folder and prefixes:
+        f = folder.replace("\\", "/").strip("/").casefold() + "/"
+        if any(f.startswith(p) for p in prefixes):
+            return ()
+    return prefixes
+
+
+def _visible(paths, prefixes: tuple[str, ...]):
+    return [p for p in paths if not policies.is_restricted(p, prefixes)]
+
+
 def _note_to_dict(n: Note) -> dict:
     return {
         "path": n.path,
@@ -140,12 +169,15 @@ class SearchResultItem(BaseModel):
 # Array-returning tools therefore wrap their payload as {"results": [...]}.
 class SearchNotesOutput(BaseModel):
     results: list[SearchResultItem]
+    restricted_hidden: bool = False
 
 class ListNotesOutput(BaseModel):
     results: list[SearchResultItem]
+    restricted_hidden: bool = False
 
 class ListNotePathsOutput(BaseModel):
     results: list[str]
+    restricted_hidden: bool = False
 
 class CreateNoteOutput(BaseModel):
     created: str
@@ -175,6 +207,7 @@ class SearchQueryOutput(BaseModel):
     corrected: str
     total: int
     results: list[SearchQueryItem]
+    restricted_hidden: bool = False
 
 class RebuildIndexOutput(BaseModel):
     indexed: int
@@ -198,6 +231,7 @@ class BacklinkItem(BaseModel):
 
 class GetBacklinksOutput(BaseModel):
     results: list[BacklinkItem]
+    restricted_hidden: bool = False
 
 class FrontmatterGetOutput(BaseModel):
     key: str
@@ -265,6 +299,7 @@ class VaultGraphOutput(BaseModel):
     nodes: list[GraphNode]
     edges: list[GraphEdge]
     stats: GraphStats
+    restricted_hidden: bool = False
 
 class OrphanItem(BaseModel):
     path: str
@@ -272,6 +307,7 @@ class OrphanItem(BaseModel):
 
 class FindOrphansOutput(BaseModel):
     results: list[OrphanItem]
+    restricted_hidden: bool = False
 
 class GetOutlinksOutput(BaseModel):
     results: list[str]
@@ -284,6 +320,7 @@ class VaultHealthOutput(BaseModel):
     score: int | float
     total_notes: int
     checks: dict[str, HealthCheckItem]
+    restricted_hidden: bool = False
 
 
 # ---- TOOLS (actions the LLM can call) ----------------------------------
@@ -322,6 +359,7 @@ def search_notes(
     query: str = Field(
         description="Free-text search term. Searches titles and Markdown bodies case-insensitively. Example: 'Qdrant'."
     ),
+    include_restricted: bool = _include_restricted_field(),
 ) -> SearchNotesOutput:
     """Search the vault for notes matching a full-text query.
 
@@ -334,11 +372,12 @@ def search_notes(
 
     Side effects: READ-ONLY.
     """
-    hits = _get_vault().search(query)
+    hidden = _hidden(include_restricted)
+    hits = _get_vault().search(query, exclude_prefixes=hidden)
     summary = [
         {"path": h.path, "title": h.title, "tags": h.tags} for h in hits
     ]
-    return SearchNotesOutput(results=summary)
+    return SearchNotesOutput(results=summary, restricted_hidden=bool(hidden))
 
 
 @mcp.tool()
@@ -347,6 +386,7 @@ def list_notes(
         default="",
         description="Subfolder path relative to the vault root. Empty string (default) lists the entire vault. Example: 'Projects'.",
     ),
+    include_restricted: bool = _include_restricted_field(),
 ) -> ListNotesOutput:
     """List all notes in the vault, optionally scoped to a subfolder.
 
@@ -357,14 +397,16 @@ def list_notes(
 
     Side effects: READ-ONLY.
     """
+    hidden = _hidden(include_restricted, folder)
     try:
         notes = _get_vault().list_notes(folder)
     except PermissionError as e:
         raise _to_mcp_error(e)
+    visible = set(_visible([n.path for n in notes], hidden))
     summary = [
-        {"path": n.path, "title": n.title, "tags": n.tags} for n in notes
+        {"path": n.path, "title": n.title, "tags": n.tags} for n in notes if n.path in visible
     ]
-    return ListNotesOutput(results=summary)
+    return ListNotesOutput(results=summary, restricted_hidden=bool(hidden))
 
 
 @mcp.tool()
@@ -373,6 +415,7 @@ def list_note_paths(
         default="",
         description="Subfolder path relative to the vault root. Empty string (default) returns paths for the entire vault. Example: 'Projects'.",
     ),
+    include_restricted: bool = _include_restricted_field(),
 ) -> ListNotePathsOutput:
     """List note paths only, without parsing content or frontmatter.
 
@@ -383,11 +426,12 @@ def list_note_paths(
 
     Side effects: READ-ONLY.
     """
+    hidden = _hidden(include_restricted, folder)
     try:
         paths = _get_vault().list_note_paths(folder)
     except PermissionError as e:
         raise _to_mcp_error(e)
-    return ListNotePathsOutput(results=paths)
+    return ListNotePathsOutput(results=_visible(paths, hidden), restricted_hidden=bool(hidden))
 
 
 @mcp.tool()
@@ -457,6 +501,7 @@ def get_backlinks(
     title: str = Field(
         description="Title of the target note to search for in [[wikilinks]]. Example: 'Second Brain Agent'."
     ),
+    include_restricted: bool = _include_restricted_field(),
 ) -> GetBacklinksOutput:
     """Find all notes that link to the given note via [[wikilinks]].
 
@@ -467,9 +512,10 @@ def get_backlinks(
 
     Side effects: READ-ONLY.
     """
-    hits = _get_vault().get_backlinks(title)
+    hidden = _hidden(include_restricted)
+    hits = _get_vault().get_backlinks(title, exclude_prefixes=hidden)
     summary = [{"path": h.path, "title": h.title} for h in hits]
-    return GetBacklinksOutput(results=summary)
+    return GetBacklinksOutput(results=summary, restricted_hidden=bool(hidden))
 
 
 @mcp.tool()
@@ -799,7 +845,7 @@ def search_and_replace(
 
 
 @mcp.tool()
-def vault_graph() -> VaultGraphOutput:
+def vault_graph(include_restricted: bool = _include_restricted_field()) -> VaultGraphOutput:
     """Return the complete vault link graph built from [[wikilinks]].
 
     Use this when the user wants to understand how notes are connected, visualize
@@ -813,13 +859,14 @@ def vault_graph() -> VaultGraphOutput:
     Side effects: READ-ONLY.
     """
     try:
-        return _get_vault().vault_graph()
+        hidden = _hidden(include_restricted)
+        return {**_get_vault().vault_graph(exclude_prefixes=hidden), "restricted_hidden": bool(hidden)}
     except Exception as e:
         raise _to_mcp_error(e)
 
 
 @mcp.tool()
-def find_orphans() -> FindOrphansOutput:
+def find_orphans(include_restricted: bool = _include_restricted_field()) -> FindOrphansOutput:
     """Find isolated notes with no incoming or outgoing wikilinks.
 
     Use this when the user wants to identify disconnected notes that may need
@@ -830,8 +877,10 @@ def find_orphans() -> FindOrphansOutput:
     Side effects: READ-ONLY.
     """
     try:
-        orphans = _get_vault().find_orphans()
-        return FindOrphansOutput(results=[{"path": n.path, "title": n.title} for n in orphans])
+        hidden = _hidden(include_restricted)
+        orphans = _get_vault().find_orphans(exclude_prefixes=hidden)
+        return FindOrphansOutput(results=[{"path": n.path, "title": n.title} for n in orphans],
+                                 restricted_hidden=bool(hidden))
     except Exception as e:
         raise _to_mcp_error(e)
 
@@ -860,7 +909,7 @@ def get_outlinks(
 
 
 @mcp.tool()
-def vault_health() -> VaultHealthOutput:
+def vault_health(include_restricted: bool = _include_restricted_field()) -> VaultHealthOutput:
     """Analyze vault health and return a structured report.
 
     Use this when the user wants a quick quality overview: broken links,
@@ -883,7 +932,8 @@ def vault_health() -> VaultHealthOutput:
     Side effects: READ-ONLY.
     """
     try:
-        return _get_vault().vault_health()
+        hidden = _hidden(include_restricted)
+        return {**_get_vault().vault_health(exclude_prefixes=hidden), "restricted_hidden": bool(hidden)}
     except Exception as e:
         raise _to_mcp_error(e)
 
@@ -939,7 +989,7 @@ def project_checkin(project: str) -> str:
 @mcp.resource("vault://structure", mime_type="application/json")
 def vault_structure() -> str:
     """Return the folder/file structure of the vault as a JSON tree."""
-    paths = _get_vault().list_note_paths()
+    paths = _visible(_get_vault().list_note_paths(), _hidden(False))
     tree: dict = {}
     for path_str in paths:
         parts = path_str.split("/")
@@ -967,6 +1017,7 @@ def search_query(
     limit: int = Field(
         default=20, description="Maximum number of results. Default 20."
     ),
+    include_restricted: bool = _include_restricted_field(),
 ) -> SearchQueryOutput:
     """Run a ranked, tokenized full-text query against the vault index.
 
@@ -987,13 +1038,15 @@ def search_query(
                 "Search index unavailable (whoosh3 missing or VAULT_INDEX=0). "
                 "Use search_notes for plain substring search."
             )
-        results = ix.search(query, limit=limit)
+        hidden = _hidden(include_restricted)
+        results = ix.search(query, limit=limit, exclude_prefixes=hidden)
         corrected = ix.corrected(query)
         out: dict = {
             "query": query,
             "corrected": corrected,
             "total": len(results),
             "results": results,
+            "restricted_hidden": bool(hidden),
         }
         return out
     except Exception as e:
