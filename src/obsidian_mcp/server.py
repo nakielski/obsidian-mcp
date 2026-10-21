@@ -1187,7 +1187,8 @@ def hybrid_search(
     "results": [{path, title, heading (best matching section), snippet, uid,
     tags, score, sources, fulltext_rank, semantic_rank, all_terms_rank, demoted,
     variants}]}.
-    "all_terms_rank" is set when the note contains every word of the query.
+    "all_terms_rank" is set when the note contains every word of the query
+    (only if the owner enabled that signal).
     "demoted": the note lies in a folder the owner ranks lower (e.g. mirrored
     third-party docs); prefer the user's own notes when both answer the question.
     "variants" lists other versions/copies of the same note (drafts, archive

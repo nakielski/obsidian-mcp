@@ -16,6 +16,7 @@ _WS_RE = re.compile(r"\s+")
 RESERVE = 3  # best hits of each retriever that always make it into the result
 SECONDARY_DEFAULT = ("06 Archive", "raw")
 DEMOTE_WEIGHT = 0.5  # score factor for OBSIDIAN_SEARCH_DEMOTE folders
+ALL_TERMS_WEIGHT = 1.0  # weight of the AND full-text list in the fusion
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _VERSION_RE = re.compile(r"\bv\d+(?:\.\d+)*\b")
 _NOISE_RE = re.compile(r"\b(?:final|kopie|copy)\b")
@@ -87,18 +88,20 @@ def path_matcher(patterns) -> re.Pattern | None:
 
 def rrf_fuse(fulltext: list[dict], semantic: list[dict], limit: int, k: int = RRF_K,
              reserve: int = RESERVE, secondary: tuple[str, ...] = SECONDARY_DEFAULT, *,
-             all_terms: list[dict] | None = None, demote: tuple[str, ...] = (),
-             demote_weight: float = DEMOTE_WEIGHT) -> list[dict]:
+             all_terms: list[dict] | None = None, all_terms_weight: float = ALL_TERMS_WEIGHT,
+             demote: tuple[str, ...] = (), demote_weight: float = DEMOTE_WEIGHT) -> list[dict]:
     """Merge ranked hit lists: Reciprocal Rank Fusion plus four corrections.
 
     1. RRF: score = sum of 1 / (k + rank) per retriever, rank 1-based. Needs no
        score calibration between BM25 and cosine similarity; a note found by
        both retrievers outranks one found by a single retriever at the same rank.
-    2. All terms: ``all_terms`` is the full-text result with every query word
-       required (AND). It counts as a third list, so for keyword queries
-       ('Tailscale ACL') notes containing all words beat notes that repeat one
-       word often. Natural-language questions rarely match with AND, then the
-       list is empty and changes nothing.
+    2. All terms (optional): ``all_terms`` is the full-text result with every
+       query word required (AND), counted as a third list with
+       ``all_terms_weight``. It lifts notes containing all words of a keyword
+       query; 0 ignores the list. Off by default in ``hybrid_query``: on the
+       reference question set it helped one keyword query and pushed the
+       expected note of another from rank 1 to 9, because many notes on the
+       same topic contained all words.
     3. Demotion: hits in the ``demote`` folders (prefixes or globs, see
        ``path_matcher``), typically mirrored third-party documentation, get
        ``demote_weight`` times the score and never take a reserved slot. They
@@ -116,6 +119,9 @@ def rrf_fuse(fulltext: list[dict], semantic: list[dict], limit: int, k: int = RR
     """
     demoted = path_matcher(demote)
     weight = min(max(float(demote_weight), 0.0), 1.0)
+    at_weight = min(max(float(all_terms_weight), 0.0), 1.0)
+    if at_weight == 0:
+        all_terms = None
 
     def is_demoted(path: str) -> bool:
         return bool(demoted and demoted.match(path.replace("\\", "/").casefold()))
@@ -132,7 +138,8 @@ def rrf_fuse(fulltext: list[dict], semantic: list[dict], limit: int, k: int = RR
             })
             if entry[f"{source}_rank"] is not None:  # duplicate path within one list
                 continue
-            entry["score"] += (weight if entry["demoted"] else 1.0) / (k + rank)
+            w = (weight if entry["demoted"] else 1.0) * (at_weight if source == "all_terms" else 1.0)
+            entry["score"] += w / (k + rank)
             entry[f"{source}_rank"] = rank
             label = "fulltext" if source == "all_terms" else source
             if label not in entry["sources"]:
@@ -202,11 +209,13 @@ def make_snippet(text: str, max_chars: int = 280) -> str:
 
 
 def collect(vault, query: str, limit: int = 10, folder: str = "",
-            include_restricted: bool = False, cfg=None, candidates: int | None = None) -> dict:
+            include_restricted: bool = False, cfg=None, candidates: int | None = None,
+            all_terms: bool | None = None) -> dict:
     """Run the retrievers with the same folder policy; return the raw ranked lists.
 
-    {"fulltext": OR full text, "all_terms": AND full text (only for queries of
-    two or more words), "semantic": vectors, "ft_ok", "sem_ok", "warnings"}.
+    {"fulltext": OR full text, "all_terms": AND full text (queries of two or
+    more words, only if cfg.all_terms_weight > 0 or ``all_terms`` is True),
+    "semantic": vectors, "ft_ok", "sem_ok", "warnings"}.
     ``candidates`` overrides the list length (the eval dump fetches more).
     """
     from .semantic_index import INSTALL_HINT, QDRANT_AVAILABLE, SemanticConfig, normalize_prefix
@@ -227,7 +236,8 @@ def collect(vault, query: str, limit: int = 10, folder: str = "",
             if query.strip():
                 out["fulltext"] = ix.search(query, limit=n, any_term=True,
                                             folder=folder_prefix, exclude_prefixes=restricted)
-                if len(query.split()) > 1:
+                want_and = cfg.all_terms_weight > 0 if all_terms is None else all_terms
+                if want_and and len(query.split()) > 1:
                     out["all_terms"] = ix.search(query, limit=n, any_term=False,
                                                  folder=folder_prefix, exclude_prefixes=restricted)
             out["ft_ok"] = True
@@ -264,6 +274,7 @@ def fuse(lists: dict, limit: int, cfg, candidates: int | None = None) -> list[di
     n = candidates or candidate_count(limit, cfg)
     return rrf_fuse(lists.get("fulltext", [])[:n], lists.get("semantic", [])[:n], limit,
                     secondary=cfg.secondary, all_terms=lists.get("all_terms", [])[:n],
+                    all_terms_weight=cfg.all_terms_weight,
                     demote=cfg.demote, demote_weight=cfg.demote_weight)
 
 

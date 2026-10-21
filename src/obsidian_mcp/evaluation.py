@@ -119,7 +119,8 @@ def run_eval(vault, questions: list[dict], k: int = 10, include_restricted: bool
         except Exception as e:  # e.g. query syntax
             row["fulltext_rank"], row["fulltext_top"], row["fulltext_error"] = None, [], str(e)
         fetch = max(DUMP_CANDIDATES, candidate_count(limit, cfg)) if dump else None
-        lists = collect(vault, q["question"], limit, "", include_restricted, cfg, candidates=fetch)
+        lists = collect(vault, q["question"], limit, "", include_restricted, cfg, candidates=fetch,
+                        all_terms=True if dump else None)  # the dump keeps the AND list for replays
         if not lists["ft_ok"] and not lists["sem_ok"]:
             raise RuntimeError("No search backend available: " + "; ".join(lists["warnings"]))
         results = keep(fuse(lists, limit, cfg))
@@ -141,13 +142,14 @@ def run_eval(vault, questions: list[dict], k: int = 10, include_restricted: bool
 def settings(cfg) -> dict:
     """The ranking settings a run used (printed with every report)."""
     return {"demote": list(cfg.demote), "demote_weight": cfg.demote_weight,
-            "candidates": cfg.candidates, "secondary": list(cfg.secondary)}
+            "candidates": cfg.candidates, "all_terms_weight": cfg.all_terms_weight,
+            "secondary": list(cfg.secondary)}
 
 
 def replay_eval(dump: dict, k: int | None = None) -> dict:
     """Re-rank the stored lists of an ``eval --dump`` file with the current
     settings (OBSIDIAN_SEARCH_DEMOTE, ..._WEIGHT, OBSIDIAN_HYBRID_CANDIDATES,
-    OBSIDIAN_SEARCH_SECONDARY) - no index, no Qdrant, no Ollama needed.
+    OBSIDIAN_HYBRID_ALL_TERMS_WEIGHT, OBSIDIAN_SEARCH_SECONDARY) - no index, no Qdrant, no Ollama needed.
     Full-text ranks are taken over from the dump unchanged."""
     from .hybrid import fuse
     from .semantic_index import SemanticConfig
@@ -195,7 +197,8 @@ def _settings_line(result: dict) -> list[str]:
     demote = ", ".join(f"`{d}`" for d in st["demote"]) or "–"
     label = "Nachgerechnet mit" if "replay" in result else "Einstellungen"
     return [f"{label}: zurückgestuft {demote} (Faktor {st['demote_weight']}), "
-            f"Kandidaten je Liste ≥ {st['candidates']}", ""]
+            f"Kandidaten je Liste ≥ {st['candidates']}, "
+            f"UND-Liste Gewicht {st.get('all_terms_weight', 0)}", ""]
 
 
 def to_markdown(result: dict) -> str:
