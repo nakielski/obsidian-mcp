@@ -283,6 +283,14 @@ def test_fusion_demoted_hits_take_no_reserved_slot():
     assert "sem1.md" in paths and "vendor/x/a.md" not in paths
 
 
+def test_fusion_demoted_top_hit_forfeits_its_slot():
+    # the semantic top 3 are mirrors: no weaker semantic hit is pulled up instead
+    both = [{"path": f"both{i}.md"} for i in range(12)]
+    sem = [{"path": f"vendor/x/{i}.md"} for i in range(3)] + [{"path": "weak.md"}] + both
+    fused = rrf_fuse(both, sem, limit=6, demote=("vendor/",))
+    assert "weak.md" not in [f["path"] for f in fused]
+
+
 def test_fusion_all_terms_list_lifts_exact_matches():
     # OR full text: one note repeats 'tailscale' often; the note with both words is 6th
     ft = [{"path": f"tailscale{i}.md"} for i in range(5)] + [{"path": "Phase 0.md"}]
