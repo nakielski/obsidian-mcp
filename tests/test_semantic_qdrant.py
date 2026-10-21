@@ -355,3 +355,46 @@ def test_min_score_drops_weak_neighbours(env, monkeypatch):
     assert {h["path"] for h in sx.search("pkw reifen")} == {"Notes/Fuhrpark.md", "Notes/Garten.md"}
     sx.cfg = SemanticConfig(**{**sx.cfg.__dict__, "min_score": 0.3})
     assert [h["path"] for h in sx.search("pkw reifen")] == ["Notes/Fuhrpark.md"]
+
+
+# ---- evaluation ----------------------------------------------------------
+
+
+def test_eval_compares_fulltext_and_hybrid(env, tmp_path):
+    from obsidian_mcp.evaluation import load_questions, run_eval, to_markdown
+
+    v, sx, emb = env
+    v.create("Notes/Auto.md", "# Auto\n\nMein Auto steht in der Garage.")
+    v.create("Notes/Feier.md", "# Feier\n\nDie Feier war am Samstag.")
+    v.create("Notes/Entwurf v0.1 2026-10-01.md", "# Entwurf\n\nGeburtstag planen.")
+    v.create("Notes/Entwurf v0.2 2026-10-02.md", "# Entwurf\n\nGeburtstag planen, zweite Fassung.")
+    v.create("05 People/Anna.md", "# Anna\n\nAnna hat einen Wagen.")
+    qfile = tmp_path / "Fragen.md"
+    qfile.write_text(
+        "# Fragenset\n\nText davor.\n\n```yaml\n"
+        "- frage: Auto Garage\n  erwartet: [Notes/Auto]\n"
+        "- frage: wo steht der pkw\n  erwartet: [Auto.md]\n"
+        "- question: Geburtstag party\n  expect: Entwurf v0.1\n"
+        "- frage: wer hat einen wagen\n  erwartet: [05 People/]\n"
+        "```\n", encoding="utf-8")
+    qs = load_questions(qfile)
+    assert [q["id"] for q in qs] == [1, 2, 3, 4]
+    res = run_eval(v, qs, k=5)
+    rows = {r["id"]: r for r in res["rows"]}
+    assert rows[1]["fulltext_rank"] == 1 and rows[1]["hybrid_rank"] == 1
+    assert rows[2]["fulltext_rank"] is None and rows[2]["hybrid_rank"] is not None  # synonym only
+    assert rows[3]["hybrid_rank"] is not None  # found via the folded variant
+    assert rows[4]["fulltext_rank"] is None and rows[4]["hybrid_rank"] is None  # restricted stays hidden
+    assert res["summary"]["only_hybrid"] >= 1
+    md = to_markdown(res)
+    assert "| Treffer unter den ersten 5 |" in md and "wo steht der pkw" in md
+    assert run_eval(v, qs[3:], k=5, include_restricted=True)["rows"][0]["hybrid_rank"] is not None
+
+
+def test_load_questions_rejects_incomplete_entries(tmp_path):
+    from obsidian_mcp.evaluation import load_questions
+
+    f = tmp_path / "q.yaml"
+    f.write_text("- frage: ohne Erwartung\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="erwartet"):
+        load_questions(f)

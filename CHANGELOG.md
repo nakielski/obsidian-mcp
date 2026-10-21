@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `obsidian-mcp-semantic eval FILE`: compares `search_query` and `hybrid_search`
+  on a question set (YAML/JSON or a ```yaml block in a vault note) and reports
+  hit@1/@5/@k, MRR and per-question ranks as Markdown or JSON.
+- The server reconciles the full-text index with the disk once in the
+  background on start (skipped if the shared index was reconciled within
+  `OBSIDIAN_INDEX_RECONCILE_MAX_AGE`, default 900 s; off with
+  `OBSIDIAN_INDEX_RECONCILE=0`), so machines without a sync loop pick up
+  file-sync changes too.
 - `OBSIDIAN_SEARCH_RESTRICTED` now applies to every search, listing and graph
   tool, not only `hybrid_search`: `search_notes`, `search_query`, `list_notes`,
   `list_note_paths`, `get_backlinks`, `vault_graph`, `find_orphans`,

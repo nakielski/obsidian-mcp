@@ -140,6 +140,13 @@ Links into a hidden folder still resolve (no false broken links), but the
 graph shows only the link text, not the hidden path. Unset (default): nothing
 is hidden.
 
+**Index freshness:** on start the server reconciles the full-text index with
+the files on disk in the background (notes moved or edited by file sync or the
+Obsidian editor while it was not running). Processes sharing one index do this
+once: a process skips if the index was reconciled within
+`OBSIDIAN_INDEX_RECONCILE_MAX_AGE` seconds (default 900).
+`OBSIDIAN_INDEX_RECONCILE=0` turns it off.
+
 Optional, with `pip install 'obsidian-mcp[semantic]'` and `OBSIDIAN_SEMANTIC=1`
 (see [Semantic Search](docs/SEMANTIC_SEARCH.md)):
 

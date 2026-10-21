@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime
 import os
 import re
+import time
 from pathlib import Path, PurePosixPath
 
 try:
@@ -148,6 +149,7 @@ class VaultIndex:
         """
         if "fsig" not in self._ix.schema.names():
             stats = self.rebuild(notes)
+            self._touch_stamp()
             return {"rebuilt": True, "added": stats["indexed"], "updated": 0, "removed": 0}
         current = {n.path: n for n in notes}
         with self._ix.searcher() as s:
@@ -162,7 +164,23 @@ class VaultIndex:
             for p in added + updated:
                 writer.update_document(**self._note_fields(current[p]))
             writer.commit()
+        self._touch_stamp()
         return {"rebuilt": False, "added": len(added), "updated": len(updated), "removed": len(removed)}
+
+    STAMP = "reconcile.stamp"
+
+    def _touch_stamp(self) -> None:
+        try:
+            (self.index_dir / self.STAMP).write_text(str(time.time()), encoding="ascii")
+        except OSError:
+            pass
+
+    def reconciled_within(self, seconds: float) -> bool:
+        """True if any process sharing this index reconciled it in the last ``seconds``."""
+        try:
+            return time.time() - (self.index_dir / self.STAMP).stat().st_mtime < seconds
+        except OSError:
+            return False
 
     def count(self) -> int:
         return self._ix.doc_count()
