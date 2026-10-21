@@ -113,6 +113,7 @@ class SemanticConfig:
     demote: tuple[str, ...] = ("**/node_modules/",)
     demote_weight: float = 0.5
     candidates: int = 30
+    all_terms_weight: float = 0.0
     max_chunk_chars: int = 2000
     backoff_seconds: float = 60.0
     min_score: float = 0.0
@@ -147,6 +148,7 @@ class SemanticConfig:
                     if "OBSIDIAN_SEARCH_DEMOTE" in os.environ else ("**/node_modules/",)),
             demote_weight=min(max(float(env("OBSIDIAN_SEARCH_DEMOTE_WEIGHT", "0.5")), 0.0), 1.0),
             candidates=max(10, int(env("OBSIDIAN_HYBRID_CANDIDATES", "30"))),
+            all_terms_weight=min(max(float(env("OBSIDIAN_HYBRID_ALL_TERMS_WEIGHT", "0")), 0.0), 1.0),
             max_chunk_chars=max(200, int(env("OBSIDIAN_SEMANTIC_CHUNK_CHARS", "2000"))),
             backoff_seconds=float(env("OBSIDIAN_SEMANTIC_BACKOFF", "60")),
             min_score=float(env("OBSIDIAN_SEMANTIC_MIN_SCORE", "0")),

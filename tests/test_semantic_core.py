@@ -75,10 +75,14 @@ def test_config_from_env(monkeypatch):
 
 
 def test_config_ranking_settings(monkeypatch):
-    for k in ("OBSIDIAN_SEARCH_DEMOTE", "OBSIDIAN_SEARCH_DEMOTE_WEIGHT", "OBSIDIAN_HYBRID_CANDIDATES"):
+    for k in ("OBSIDIAN_SEARCH_DEMOTE", "OBSIDIAN_SEARCH_DEMOTE_WEIGHT", "OBSIDIAN_HYBRID_CANDIDATES",
+              "OBSIDIAN_HYBRID_ALL_TERMS_WEIGHT"):
         monkeypatch.delenv(k, raising=False)
     cfg = SemanticConfig.from_env()
     assert cfg.demote == ("**/node_modules/",) and cfg.demote_weight == 0.5 and cfg.candidates == 30
+    assert cfg.all_terms_weight == 0.0
+    monkeypatch.setenv("OBSIDIAN_HYBRID_ALL_TERMS_WEIGHT", "0.3")
+    assert SemanticConfig.from_env().all_terms_weight == 0.3
     monkeypatch.setenv("OBSIDIAN_SEARCH_DEMOTE", " raw/repos/*/*/ , Vendor ")
     monkeypatch.setenv("OBSIDIAN_SEARCH_DEMOTE_WEIGHT", "3")
     monkeypatch.setenv("OBSIDIAN_HYBRID_CANDIDATES", "60")
@@ -290,6 +294,16 @@ def test_fusion_all_terms_list_lifts_exact_matches():
     top = after_hits[0]
     assert top["all_terms_rank"] == 1 and top["fulltext_rank"] == 6
     assert top["sources"] == ["fulltext", "semantic"]
+
+
+def test_fusion_all_terms_weight_scales_and_zero_ignores_the_list():
+    ft = [{"path": "a.md"}, {"path": "b.md"}]
+    plain = rrf_fuse(ft, [], limit=5)
+    off = rrf_fuse(ft, [], limit=5, all_terms=[{"path": "b.md"}], all_terms_weight=0)
+    assert off == plain
+    half = rrf_fuse(ft, [], limit=5, all_terms=[{"path": "b.md"}], all_terms_weight=0.5)
+    b = next(f for f in half if f["path"] == "b.md")
+    assert b["score"] == round(1 / 62 + 0.5 / 61, 6)
 
 
 def test_fusion_all_terms_hit_beyond_or_list_counts_as_fulltext():

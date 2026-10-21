@@ -47,7 +47,8 @@ Environment:
 | `OBSIDIAN_SEARCH_SECONDARY` | `06 Archive,raw` | Folders holding archived copies and raw records: when several variants of a note match, a copy outside these folders is shown first (nothing is hidden). Set empty to disable |
 | `OBSIDIAN_SEARCH_DEMOTE` | `**/node_modules/` | Comma-separated folders or globs ranked lower in `hybrid_search`, e.g. mirrored third-party docs: `raw/repos/*/*/` (`*` = one folder level, `**` = any depth, a pattern ending in `.md` = one note). Hits stay findable and are marked `demoted`. Setting the variable replaces the default; empty disables |
 | `OBSIDIAN_SEARCH_DEMOTE_WEIGHT` | `0.5` | Score factor for demoted hits (0–1); `0` puts them behind everything else |
-| `OBSIDIAN_HYBRID_CANDIDATES` | `30` | Minimum list length per retriever before fusion (at least 3 × `limit`) |
+| `OBSIDIAN_HYBRID_CANDIDATES` | `30` | Minimum list length per retriever before fusion (at least 3 × `limit`). Longer lists measured worse: more loose matches found by both retrievers crowd out semantic-only hits |
+| `OBSIDIAN_HYBRID_ALL_TERMS_WEIGHT` | `0` (off) | Weight (0–1) of an extra full-text list with every query word required (AND). See *All words* below |
 | `OBSIDIAN_SEMANTIC_EXCLUDE` | empty | Comma-separated folders that are never embedded |
 | `OBSIDIAN_SEMANTIC_MIN_SCORE` | `0` (off) | Drop vector hits below this cosine similarity; tune per model |
 | `OBSIDIAN_SEMANTIC_CHUNK_CHARS` | `2000` | Max characters per chunk |
@@ -109,12 +110,15 @@ index created before this version is rebuilt once on the first sync.
   both retrievers ranks above one found by a single retriever at the same
   rank. Natural-language questions use OR semantics on the full-text side.
   Corrections on top:
-  - *All words*: for queries of two or more words the full text runs a
-    second time with every word required (AND), and that list counts as a
-    third one. For keyword queries such as `Tailscale ACL` a note containing
-    both words beats a note that repeats one of them often; hits carry
-    `all_terms_rank`. Questions in everyday language rarely contain all their
-    words in one note, then the list is empty and changes nothing.
+  - *All words* (off by default): with `OBSIDIAN_HYBRID_ALL_TERMS_WEIGHT`
+    above 0, queries of two or more words also run the full text with every
+    word required (AND), and that list counts as a third one; hits carry
+    `all_terms_rank`. On the reference question set it lifted one keyword
+    query (`Tailscale ACL`, 4 → 2) but pushed another (`Copilot Einführung
+    Blueprint`) from 1 to 9: the expected note lacks one of the words, a dozen
+    notes on the same topic contain all of them. Even a weight of 0.1 cost
+    more than it gained, hence off. `eval --dump` always records the list, so
+    `--replay` can test it on your own questions.
   - *Demotion*: hits in `OBSIDIAN_SEARCH_DEMOTE` count with
     `OBSIDIAN_SEARCH_DEMOTE_WEIGHT` and never take a reserved slot. Mirrored
     manuals then stop crowding out your own notes on the same topic, and are
@@ -161,8 +165,8 @@ OBSIDIAN_SEARCH_DEMOTE="raw/repos/*/*/" OBSIDIAN_SEARCH_DEMOTE_WEIGHT=0.3 \
 
 `--dump` stores the raw ranked lists of every retriever (100 per list);
 `--replay` fuses them again with the current `OBSIDIAN_SEARCH_DEMOTE`,
-`OBSIDIAN_SEARCH_DEMOTE_WEIGHT`, `OBSIDIAN_HYBRID_CANDIDATES` and
-`OBSIDIAN_SEARCH_SECONDARY` and prints the same report. Full-text ranks are
+`OBSIDIAN_SEARCH_DEMOTE_WEIGHT`, `OBSIDIAN_HYBRID_CANDIDATES`,
+`OBSIDIAN_HYBRID_ALL_TERMS_WEIGHT` and `OBSIDIAN_SEARCH_SECONDARY` and prints the same report. Full-text ranks are
 taken over from the dump.
 
 ## Tools

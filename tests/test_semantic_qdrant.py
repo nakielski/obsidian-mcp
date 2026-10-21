@@ -433,6 +433,9 @@ def test_hybrid_ranks_notes_with_all_words_first_and_marks_demoted(env, monkeypa
         v.create(f"Notes/Netz {i}.md", f"# Netz {i}\n\nTailscale Tailscale Tailscale Notiz {i}.")
     v.create("Notes/Phase 0.md", "# Phase 0\n\nDie Tailscale ACL regelt den Zugriff.")
     v.create("Vendor/tool/ACL.md", "# ACL\n\nTailscale ACL reference, Tailscale ACL syntax.")
+    default = hybrid_query(v, "Tailscale ACL", limit=6)["results"]  # AND list off by default
+    assert all(r["all_terms_rank"] is None for r in default)
+    monkeypatch.setenv("OBSIDIAN_HYBRID_ALL_TERMS_WEIGHT", "1")
     res = hybrid_query(v, "Tailscale ACL", limit=6)
     paths = [r["path"] for r in res["results"]]
     assert paths[0] == "Notes/Phase 0.md"
