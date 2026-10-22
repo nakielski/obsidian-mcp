@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Policy refusals reach the client as such: `Blocked by RAW_IMMUTABLE: …` or
+  `Blocked by VAULT_LOCK: …`, with `data.policy` and the note that the refusal
+  is deliberate and must not be retried. Before, they surfaced as
+  `Unexpected error: … retry`, which invited the agent to try again;
+  `create_note` passed a foreign-lock refusal through unmapped.
+
 ### Added
 - `OBSIDIAN_HYBRID_ALL_TERMS_WEIGHT` (default 0, off): an optional extra
   full-text list with every query word required (AND) in the fusion
