@@ -131,6 +131,13 @@ def _actionable_message(e: Exception) -> str:
             f"Invalid value: {text}. "
             "Check the parameter format and allowed values, then try again."
         )
+    if isinstance(e, policies.PolicyViolationError):
+        policy = getattr(e, "policy", "") or "vault policy"
+        return (
+            f"Blocked by {policy}: {text} "
+            "This is a deliberate refusal by the server, not a failure: do not retry "
+            "the same write."
+        )
     return f"Unexpected error: {text}. Review the request and retry, or inspect the vault state."
 
 
@@ -144,10 +151,13 @@ def _to_mcp_error(e: Exception) -> McpError:
         code = -32603
     else:
         code = -32603
+    data = {"error_type": type(e).__name__}
+    if isinstance(e, policies.PolicyViolationError) and getattr(e, "policy", ""):
+        data["policy"] = e.policy
     return McpError(ErrorData(
         code=code,
         message=_actionable_message(e),
-        data={"error_type": type(e).__name__},
+        data=data,
     ))
 
 
@@ -463,7 +473,7 @@ def create_note(
         with policies.related_context(related_to):
             n = _get_vault().create(path, content, tags)
         return {"created": n.path}
-    except (PermissionError, FileExistsError, ValueError, OSError) as e:
+    except (PermissionError, FileExistsError, ValueError, OSError, policies.PolicyViolationError) as e:
         raise _to_mcp_error(e)
 
 

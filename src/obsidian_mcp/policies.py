@@ -75,7 +75,15 @@ _WIKILINK_RE = re.compile(r"!?\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
 
 
 class PolicyViolationError(Exception):
-    """Raised when a write violates an enforced vault policy."""
+    """Raised when a write violates an enforced vault policy.
+
+    ``policy`` names the rule (RAW_IMMUTABLE, VAULT_LOCK) so clients and logs
+    can tell a deliberate refusal from a failure.
+    """
+
+    def __init__(self, message: str, policy: str = "") -> None:
+        super().__init__(message)
+        self.policy = policy
 
 
 def restricted_prefixes() -> tuple[str, ...]:
@@ -264,7 +272,8 @@ def assert_mutable(rel_path: str) -> None:
             f"raw/ is immutable: {rel_path}. raw notes are original sources and "
             "must not be modified after creation. Store corrections or additions "
             "in a wiki/ or PARA note linking to the raw source instead. "
-            "(Disable with RAW_IMMUTABLE=0.)"
+            "(Disable with RAW_IMMUTABLE=0.)",
+            policy="RAW_IMMUTABLE",
         )
 
 
@@ -309,7 +318,8 @@ def assert_no_foreign_lock(vault_root: Path, actor: str | None = None) -> dict |
         raise PolicyViolationError(
             f"Vault is locked by '{holder}' (lock age {age:.0f} min, max "
             f"{LOCK_MAX_AGE_MIN}). Wait for the other agent to finish or remove "
-            f"{LOCK_FILE} if it is stale. (Disable locking with VAULT_LOCK=0.)"
+            f"{LOCK_FILE} if it is stale. (Disable locking with VAULT_LOCK=0.)",
+            policy="VAULT_LOCK",
         )
     return {"agent": holder, "age_min": age}
 

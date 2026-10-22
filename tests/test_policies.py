@@ -276,3 +276,41 @@ class TestArchiveNoteTool:
         asyncio.run(mcp.call_tool("archive_note", {"path": "wiki/concepts/Alpha.md"}))
         idx = _json.loads((tmp_path / "wiki" / "index.json").read_text(encoding="utf-8"))
         assert all(p["path"] != "concepts/Alpha.md" for p in idx["pages"])
+
+
+class TestPolicyErrorsOverMcp:
+    """A policy refusal reaches the client as such, not as an 'unexpected error'."""
+
+    def _call(self, tool, **args):
+        import asyncio
+
+        from mcp.shared.exceptions import McpError
+
+        from obsidian_mcp.server import mcp
+
+        with pytest.raises(Exception) as exc:  # FastMCP wraps it in a ToolError in-process
+            asyncio.run(mcp.call_tool(tool, args))
+        cause = exc.value if isinstance(exc.value, McpError) else exc.value.__cause__
+        assert isinstance(cause, McpError), repr(exc.value)
+        return cause.error
+
+    def test_raw_immutable_is_named_and_marked_final(self, vault, tmp_path):
+        from obsidian_mcp.server import set_vault
+
+        set_vault(vault)
+        err = self._call("patch_note", path="raw/source.md", heading="Raw Source",
+                         action="append", content="Veraltet")
+        assert err.message.startswith("Blocked by RAW_IMMUTABLE: raw/ is immutable: raw/source.md")
+        assert "do not retry" in err.message and "Unexpected" not in err.message
+        assert err.data == {"error_type": "PolicyViolationError", "policy": "RAW_IMMUTABLE"}
+        assert "Original content." in (tmp_path / "raw" / "source.md").read_text(encoding="utf-8")
+
+    def test_foreign_lock_is_named(self, vault, tmp_path, monkeypatch):
+        from obsidian_mcp.server import set_vault
+
+        monkeypatch.setenv("VAULT_ACTOR", "claude")
+        (tmp_path / ".vault-lock").write_text(json.dumps({"agent": "hermes"}), encoding="utf-8")
+        set_vault(vault)
+        err = self._call("create_note", path="Notes/x.md", content="# X")
+        assert err.message.startswith("Blocked by VAULT_LOCK: Vault is locked by 'hermes'")
+        assert err.data["policy"] == "VAULT_LOCK"
