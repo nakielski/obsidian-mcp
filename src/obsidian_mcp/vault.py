@@ -720,6 +720,9 @@ class Vault:
                 str(meta.get("uid", "") or ""),
                 action=action,
             )
+        from . import plugins  # local import: plugins never import vault
+        plugins.emit("after_write", path=rel_path, action=action, layer=layer,
+                     actor=plugins.actor())
         return result
 
     def check_note_links(self, rel_path: str) -> list[str]:

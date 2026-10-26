@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Plugin hook: packages with an entry point in `obsidian_mcp.plugins`, enabled
+  by name via `OBSIDIAN_PLUGINS`, can add tools and subscribe to the events
+  `startup`, `after_write`, `policy_refusal` and `tool_error`. Fail-open: plugin
+  errors never fail a write or a tool call. Nothing changes without the variable.
+
 ### Fixed
 - Policy refusals reach the client as such: `Blocked by RAW_IMMUTABLE: …` or
   `Blocked by VAULT_LOCK: …`, with `data.policy` and the note that the refusal
