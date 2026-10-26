@@ -886,3 +886,66 @@ class TestAppendFrontmatter:
         vault.append("Inbox/a2-read.md", self.PLAIN_CONTENT)
         n = vault.read("Inbox/a2-read.md")
         assert "# Nur Text" in n.content or n.title == "Nur Text"
+
+
+class TestServerManageFrontmatterMany:
+    """Several keys in one call (agents tried to batch and looped on errors)."""
+
+    P = "Inbox/2026-07-20.md"
+
+    def call(self, **args):
+        result = _run_async(mcp.call_tool("manage_frontmatter", {"path": self.P, **args}))
+        return json.loads(result[0][0].text)
+
+    @staticmethod
+    def log_lines(vault) -> int:
+        return sum(len(f.read_text().splitlines())
+                   for f in (vault.root / ".vault-write-log.d").glob("*.jsonl"))
+
+    def test_set_many_one_write(self, server_vault):
+        before = self.log_lines(server_vault)
+        data = self.call(action="set", values={"uid": "note-x", "status": "active",
+                                               "tags": ["a", "b"], "priority": 2})
+        assert data["values"]["status"] == "active"
+        assert server_vault.get_frontmatter(self.P, "uid") == "note-x"
+        assert server_vault.get_frontmatter(self.P, "priority") == 2
+        assert server_vault.read(self.P).content.strip()  # body untouched
+        assert self.log_lines(server_vault) - before == 1  # one write, one log line
+
+    def test_get_many(self, server_vault):
+        data = self.call(action="get", keys=["title", "missing"])
+        assert data["values"] == {"title": "Test Note", "missing": None}
+
+    def test_delete_many_reports_existing(self, server_vault):
+        server_vault.set_frontmatter(self.P, "a", 1)
+        data = self.call(action="delete", keys=["a", "nope"])
+        assert data["deleted"] == ["a"]
+        assert server_vault.get_frontmatter(self.P, "a") is None
+
+    def test_mapping_as_value_explains_values(self, server_vault):
+        with pytest.raises(Exception, match="values="):
+            self.call(action="set", key="status", value={"a": 1})
+
+    def test_both_forms_rejected(self, server_vault):
+        with pytest.raises(Exception, match="not both"):
+            self.call(action="set", key="status", values={"a": 1})
+
+    def test_key_required_without_many(self, server_vault):
+        with pytest.raises(Exception, match="several keys"):
+            self.call(action="get")
+
+    def test_bad_value_type(self, server_vault):
+        with pytest.raises(Exception, match="scalar"):
+            self.call(action="set", values={"x": {"nested": 1}})
+
+    def test_limit(self, server_vault):
+        with pytest.raises(Exception, match="At most"):
+            self.call(action="set", values={f"k{i}": i for i in range(51)})
+
+    def test_raw_immutable_still_enforced(self, server_vault):
+        raw = server_vault.root / "raw"
+        raw.mkdir(exist_ok=True)
+        (raw / "q.md").write_text("---\ntitle: q\n---\nquelle\n")
+        with pytest.raises(Exception, match="RAW_IMMUTABLE"):
+            _run_async(mcp.call_tool("manage_frontmatter", {
+                "path": "raw/q.md", "action": "set", "values": {"uid": "raw-x"}}))

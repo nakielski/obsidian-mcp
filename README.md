@@ -116,7 +116,7 @@ The server runs on stdio. Register it with your client's standard MCP configurat
 | `update_note(path, content)` | Update body (frontmatter preserved) |
 | `delete_note(path)` | Permanently delete a note |
 | `append_to_note(path, content)` | Append content (create if missing) |
-| `manage_frontmatter(path, action, key, value?)` | Get/set/delete a frontmatter key |
+| `manage_frontmatter(path, action, key?, value?, values?, keys?)` | Get/set/delete one frontmatter key, or several in one write (`values` / `keys`) |
 | `manage_tags(path, action, tags?)` | Add/remove/list tags |
 | `patch_note(path, heading, action, content)` | Insert/prepend/replace under a heading |
 | `daily_note(action, content?, date?)` | Read/append daily notes (YYYY-MM-DD.md) |

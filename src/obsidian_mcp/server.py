@@ -268,7 +268,15 @@ class FrontmatterDeleteOutput(BaseModel):
     deleted: bool
     path: str
 
-ManageFrontmatterOutput = FrontmatterGetOutput | FrontmatterSetOutput | FrontmatterDeleteOutput
+MAX_FRONTMATTER_KEYS = 50  # keys per manage_frontmatter call with 'values' / 'keys'
+
+class FrontmatterManyOutput(BaseModel):
+    path: str
+    values: dict[str, Any] = Field(default_factory=dict)
+    deleted: list[str] = Field(default_factory=list)
+
+ManageFrontmatterOutput = (FrontmatterGetOutput | FrontmatterSetOutput | FrontmatterDeleteOutput
+                           | FrontmatterManyOutput)
 
 class ManageTagsOutput(BaseModel):
     path: str
@@ -629,26 +637,39 @@ def manage_frontmatter(
         description="Vault-relative path of the note. Example: 'Inbox/2026-07-20.md'."
     ),
     action: str = Field(
-        description="Action to perform: 'get' (read a key), 'set' (write a key), or 'delete' (remove a key). Example: 'set'."
+        description="Action to perform: 'get' (read), 'set' (write), or 'delete' (remove). Example: 'set'."
     ),
     key: str = Field(
-        description="YAML frontmatter key name. Example: 'status'."
+        default="",
+        description="One YAML frontmatter key. Example: 'status'. Leave empty when using 'values' or 'keys'.",
     ),
     value: Any = Field(
         default=None,
-        description="New value when action='set'. Required for 'set'; ignored for 'get' and 'delete'. Supports str, int, float, bool, or list. Example: 'review'.",
+        description="New value when action='set' with 'key'. Supports str, int, float, bool, or list. Example: 'review'.",
+    ),
+    values: dict[str, Any] | None = Field(
+        default=None,
+        description=f"Several keys at once for action='set' (one write, up to {MAX_FRONTMATTER_KEYS}). Example: {{'uid': 'note-20261026-x', 'status': 'active', 'tags': ['a', 'b']}}.",
+    ),
+    keys: list[str] | None = Field(
+        default=None,
+        description=f"Several keys at once for action='get' or 'delete' (up to {MAX_FRONTMATTER_KEYS}). Example: ['status', 'priority'].",
     ),
     related_to: str = _related_to_field(),
 ) -> ManageFrontmatterOutput:
-    """Get, set, or delete a single key in a note's YAML frontmatter.
+    """Get, set, or delete keys in a note's YAML frontmatter.
 
     Use this when the user wants to read or modify metadata (e.g., status,
-    priority) without touching the note body.
+    priority) without touching the note body. For one key pass 'key' (and
+    'value' for set). For several keys pass 'values' (set) or 'keys' (get,
+    delete): they are applied in a single write.
 
     Returns a JSON object:
-      - get: {"key": "<key>", "value": <value>}
-      - set: {"key": "<key>", "value": <value>, "path": "<path>"}
+      - get:    {"key": "<key>", "value": <value>}
+      - set:    {"key": "<key>", "value": <value>, "path": "<path>"}
       - delete: {"key": "<key>", "deleted": true, "path": "<path>"}
+      - several keys: {"path": "<path>", "values": {...}, "deleted": [...]}
+        (get and set fill 'values', delete fills 'deleted' with the keys that existed)
 
     Side effects: 'set' and 'delete' modify frontmatter on disk; 'get' is READ-ONLY.
     """
@@ -658,8 +679,24 @@ def manage_frontmatter(
             f"Invalid frontmatter action '{action}'. "
             "Use one of: 'get', 'set', or 'delete'."
         ))
+    many = values is not None or keys is not None
+    if many and (key or value is not None):
+        raise _to_mcp_error(ValueError(
+            "Use either 'key' (and 'value') for one key, or 'values' / 'keys' for several, not both."
+        ))
+    if not many and not key:
+        raise _to_mcp_error(ValueError(
+            "key is required. For several keys at once use 'values' (set) or 'keys' (get, delete)."
+        ))
+    if not many and action == "set" and isinstance(value, dict):
+        raise _to_mcp_error(ValueError(
+            "value must not be a mapping. To set several keys in one call pass "
+            "values={'key1': ..., 'key2': ...} instead of key/value."
+        ))
     vault = _get_vault()
     try:
+        if many:
+            return _frontmatter_many(vault, path, action, values, keys, related_to)
         if action == "get":
             val = vault.get_frontmatter(path, key)
             return {"key": key, "value": val}
@@ -681,6 +718,38 @@ def manage_frontmatter(
         return {"key": key, "deleted": True, "path": path}
     except Exception as e:
         raise _to_mcp_error(e)
+
+
+def _frontmatter_value_ok(v) -> bool:
+    return isinstance(v, (str, int, float, bool, list))
+
+
+def _frontmatter_many(vault, path, action, values, keys, related_to) -> dict:
+    if action == "set":
+        if keys is not None or not values:
+            raise ValueError("action='set' with several keys needs a non-empty 'values' mapping.")
+        if len(values) > MAX_FRONTMATTER_KEYS:
+            raise ValueError(f"At most {MAX_FRONTMATTER_KEYS} keys per call.")
+        bad_keys = [k for k in values if not isinstance(k, str) or not k.strip()]
+        if bad_keys:
+            raise ValueError("Every key in 'values' must be a non-empty string.")
+        bad = [k for k, v in values.items() if not _frontmatter_value_ok(v)]
+        if bad:
+            raise ValueError(
+                f"Values for {bad} must be a scalar (str, int, float, bool) or a list.")
+        with policies.related_context(related_to):
+            vault.update_frontmatter(path, set_values=dict(values))
+        return {"path": path, "values": dict(values), "deleted": []}
+    if values is not None or not keys:
+        raise ValueError(f"action='{action}' with several keys needs a non-empty 'keys' list.")
+    if len(keys) > MAX_FRONTMATTER_KEYS:
+        raise ValueError(f"At most {MAX_FRONTMATTER_KEYS} keys per call.")
+    if action == "get":
+        return {"path": path, "values": {k: vault.get_frontmatter(path, k) for k in keys},
+                "deleted": []}
+    with policies.related_context(related_to):
+        deleted = vault.update_frontmatter(path, delete_keys=list(keys))
+    return {"path": path, "values": {}, "deleted": deleted}
 
 
 @mcp.tool()

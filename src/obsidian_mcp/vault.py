@@ -635,6 +635,35 @@ class Vault:
                 p.write_text(frontmatter.dumps(post), encoding="utf-8")
                 self._after_write(norm, "modify", self.read(rel_path))
 
+    def update_frontmatter(self, rel_path: str, set_values: dict | None = None,
+                           delete_keys: list[str] | None = None) -> list[str]:
+        """Set and/or delete several frontmatter keys in ONE write.
+
+        Body and other metadata stay unchanged. Returns the keys actually deleted
+        (keys that were not present are skipped). Nothing is written when nothing
+        changes.
+        """
+        set_values = set_values or {}
+        delete_keys = delete_keys or []
+        with self._rw_lock:
+            policies.assert_no_foreign_lock(self.root)
+            p, norm = self._resolve(rel_path)
+            policies.assert_mutable(norm)
+            if not p.exists():
+                raise FileNotFoundError(f"Note not found: {rel_path}")
+            if not p.is_file():
+                raise ValueError(f"Not a file: {rel_path}")
+            post = _load_capped(p)
+            deleted = [k for k in delete_keys if k in post.metadata]
+            for k in deleted:
+                del post.metadata[k]
+            for k, v in set_values.items():
+                post[k] = v
+            if set_values or deleted:
+                p.write_text(frontmatter.dumps(post), encoding="utf-8")
+                self._after_write(norm, "modify", self.read(rel_path))
+            return deleted
+
         # ---- tag management ----------------------------------------------
 
     def add_tags(self, rel_path: str, tags: list[str]) -> list[str]:
