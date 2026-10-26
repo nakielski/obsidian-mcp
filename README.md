@@ -155,6 +155,27 @@ Optional, with `pip install 'obsidian-mcp[semantic]'` and `OBSIDIAN_SEMANTIC=1`
 | `hybrid_search(query, limit?, folder?, include_restricted?)` | Find notes by meaning and words, fused ranking |
 | `semantic_sync(max_seconds?, status_only?)` | Catch up the vector index; report its status |
 
+### Plugins
+
+Optional extensions are installed as Python packages with an entry point in the
+group `obsidian_mcp.plugins` and enabled by name, e.g. `OBSIDIAN_PLUGINS=oversight`
+(comma-separated). Nothing is loaded without the variable. A plugin's
+`register(api)` can add tools (`api.add_tool(fn)`, core tool names are reserved) and
+subscribe to events (`api.on(event, handler)`):
+
+| Event | Keyword arguments |
+|---|---|
+| `startup` | `actor` |
+| `after_write` | `path`, `action`, `layer`, `actor` |
+| `policy_refusal` | `tool`, `policy`, `message`, `actor` |
+| `tool_error` | `tool`, `error_type`, `message`, `actor` |
+
+Plugins are fail-open: an error while loading or in a handler goes to stderr and
+never fails a write or a tool call. They run in the server process with the
+server's rights, so only enable plugins you trust. Example: the sensor of
+[agent-oversight](https://github.com/nakielski/agent-oversight) reports the
+server's heartbeat and every refusal or tool error as oversight signals.
+
 ## Prompts (3)
 
 | Prompt | Arguments | Description |

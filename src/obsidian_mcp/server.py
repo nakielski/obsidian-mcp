@@ -12,7 +12,7 @@ from mcp.shared.exceptions import McpError
 from mcp.types import ErrorData
 from pydantic import BaseModel, Field
 
-from . import __version__, policies
+from . import __version__, plugins, policies
 from .vault import Note, Vault
 
 # ---- Module-level singleton Vault instance ----------------------------
@@ -142,7 +142,8 @@ def _actionable_message(e: Exception) -> str:
 
 
 def _to_mcp_error(e: Exception) -> McpError:
-    """Construct McpError correctly with ErrorData."""
+    """Construct McpError correctly with ErrorData (and tell plugins about it)."""
+    _emit_error(e, sys._getframe(1).f_code.co_name)
     if isinstance(e, (FileNotFoundError, ValueError)):
         code = -32602
     elif isinstance(e, PermissionError):
@@ -159,6 +160,16 @@ def _to_mcp_error(e: Exception) -> McpError:
         message=_actionable_message(e),
         data=data,
     ))
+
+
+def _emit_error(e: Exception, tool: str) -> None:
+    """policy_refusal for deliberate refusals, tool_error for everything else."""
+    if isinstance(e, policies.PolicyViolationError):
+        plugins.emit("policy_refusal", tool=tool, policy=getattr(e, "policy", "") or "",
+                     message=str(e)[:500], actor=plugins.actor())
+    else:
+        plugins.emit("tool_error", tool=tool, error_type=type(e).__name__,
+                     message=str(e)[:500], actor=plugins.actor())
 
 
 # ---- output schema models ----------------------------------------------
@@ -1279,6 +1290,7 @@ def main() -> None:
     root = os.environ.get("OBSIDIAN_VAULT_ROOT", "")
     if not root:
         print("[obsidian-mcp] No OBSIDIAN_VAULT_ROOT set, using mock vault.", file=sys.stderr)
+    plugins.load(mcp, _get_vault)
     _start_reconcile(_get_vault())
     mcp.run()
 
