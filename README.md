@@ -37,13 +37,17 @@ via the Model Context Protocol.
 - Vault structure as a JSON resource
 - Path traversal protection on all entry points (vault sandbox)
 - Tag extraction (frontmatter + inline tags)
-- Structured output schemas for every MCP tool (22/22)
+- Structured output schemas for every MCP tool (29/29)
 - Vault write policies: write log (per-actor shards in `.vault-write-log.d/`,
   legacy `.vault-write-log.jsonl` as fallback/opt-out), raw/ immutability,
-  agent lock (.vault-lock), wiki/index.json upkeep, link checking. The server owns
+  scope locks per agent (`.vault-lock.d/`, legacy `.vault-lock`), wiki/index.json
+  upkeep, link checking. The server owns
   this bookkeeping: clients never append log lines themselves; every write tool
   takes an optional `related_to` (work-item uid) that lands in the log line
 - archive_note: archive-instead-of-delete with backlink reporting
+- Attachments: original files (PDF, Office, images, mails, archives) filed under
+  `raw/attachments/<YYYY>/<MM>/` with a companion note, SHA-256 deduplication and
+  a type allow-list that always refuses executables
 - Incremental Whoosh full-text index (BM25, stemmed, field queries, fuzzy,
   did-you-mean) with configurable index directory
 - Vault graph analytics (nodes, edges, stats, broken links)
@@ -104,7 +108,7 @@ Cursor supports MCP from version 0.42+. Configure in `~/.cursor/mcp.json` (same 
 The server runs on stdio. Register it with your client's standard MCP configuration
 (command: `obsidian-mcp` or `python3 -m obsidian_mcp.server`, env: `OBSIDIAN_VAULT_ROOT`).
 
-## Tools (22)
+## Tools (29)
 
 | Tool | Description |
 |---|---|
@@ -127,9 +131,32 @@ The server runs on stdio. Register it with your client's standard MCP configurat
 | `get_outlinks(path)` | Outgoing wikilinks from a note |
 | `vault_health(include_restricted?)` | Health score + issue report (0–100) |
 | `archive_note(path, archive_dir?)` | Move note to archive folder; report backlinks |
+| `lock_scope(scope, purpose?, ttl_min?)` | Lock a folder or note for this agent (other agents' writes there are refused) |
+| `refresh_lock(scope?, ttl_min?)` | Extend own active locks |
+| `release_lock(scope?)` | Release own locks |
+| `lock_status()` | List all active locks of all agents |
+| `attach_file(filename?, content_base64? \| source_path?, description?, name?, source?, related?, keep_source?)` | File an original document under `raw/attachments/` with a companion note |
+| `list_attachments(query?, related?, limit?)` | List filed attachments, newest first |
+| `read_attachment_info(path, verify?)` | Metadata of one attachment, optional SHA-256 check |
 | `search_query(query, limit?, include_restricted?)` | Ranked Lucene-style full-text query (fields, fuzzy, ranges) |
 | `rebuild_index()` | Rebuild the full-text index from all notes |
 | `index_status()` | Index health: docs indexed vs. vault notes |
+
+**Locks:** `lock_scope` writes `.vault-lock.d/<actor>.json` (one file per agent,
+so file sync never merges two writers). While a lock is active, writes of other
+agents whose target lies inside the scope are refused with `VAULT_LOCK`; writes
+elsewhere and all reads stay possible. Locks expire on their own after `ttl_min`
+(default 30, max 240). A legacy `.vault-lock` file in the vault root still locks
+the whole vault for 30 minutes after its last change. `VAULT_LOCK=0` disables
+both.
+
+**Attachments:** `attach_file` takes `content_base64` (up to
+`ATTACH_MAX_INLINE_MB`, default 10) or `source_path`, a file already in the vault
+such as `00 Inbox/scan.pdf` (up to `ATTACH_MAX_MB`, default 100; moved unless
+`keep_source`). Allowed: pdf, docx, xlsx, pptx, csv, txt, md, msg, eml, png, jpg,
+jpeg, gif, webp, svg, zip, 7z, tar.gz. The content must match the extension;
+executables, scripts, macro Office files and archives containing them are
+refused with `ATTACHMENT_TYPE`. File and companion note are raw/ and immutable.
 
 **Restricted folders (optional):** `OBSIDIAN_SEARCH_RESTRICTED="05 People,Private"`
 hides these folders from every search, listing and graph tool (and from

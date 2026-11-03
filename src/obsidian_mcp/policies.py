@@ -5,8 +5,9 @@ class) so every client inherits them:
 
 - WRITE_LOG: append a JSON line to .vault-write-log.jsonl for every write op
 - RAW_IMMUTABLE: block update/delete on notes under raw/
-- LOCK: refuse writes while a foreign .lock file younger than LOCK_MAX_AGE_MIN
-  exists in the vault root
+- LOCK: refuse writes into a scope locked by another actor (.vault-lock.d/,
+  see lock_scope) or while a foreign legacy .vault-lock file younger than
+  LOCK_MAX_AGE_MIN exists in the vault root
 - INDEX: keep wiki/index.json in sync for writes under wiki/
 - LINK_CHECK: validate new [[wikilink]] targets after a write (advisory)
 
@@ -304,24 +305,52 @@ def parse_lock(lock_path: Path) -> dict:
         return {}
 
 
-def assert_no_foreign_lock(vault_root: Path, actor: str | None = None) -> dict | None:
-    """Raise if a foreign, fresh lock exists. Returns lock info if own lock."""
+def assert_no_foreign_lock(
+    vault_root: Path, rel_path: str | None = None, actor: str | None = None
+) -> dict | None:
+    """Raise if a foreign, active lock covers ``rel_path``.
+
+    Two lock kinds are honoured:
+
+    - the legacy ``.vault-lock`` file: vault-wide, fresh for LOCK_MAX_AGE_MIN
+      minutes after its last change (kept for external writers and scripts);
+    - scope locks under ``.vault-lock.d/<actor>.json`` (lock_scope): they only
+      block writes whose target lies inside a locked scope, until they expire.
+
+    Writes by the lock holder itself always pass. ``rel_path=None`` treats
+    every foreign scope lock as covering (conservative). Returns the legacy
+    lock info for an own legacy lock, else None.
+    """
     if not _flag("VAULT_LOCK"):
         return None
     actor = actor or os.environ.get("VAULT_ACTOR", "unknown")
+    info = None
     lock_path = vault_root / LOCK_FILE
-    if not lock_path.exists():
-        return None
-    age = _lock_age_minutes(lock_path)
-    holder = parse_lock(lock_path).get("agent", "unknown")
-    if age <= LOCK_MAX_AGE_MIN and holder != actor:
-        raise PolicyViolationError(
-            f"Vault is locked by '{holder}' (lock age {age:.0f} min, max "
-            f"{LOCK_MAX_AGE_MIN}). Wait for the other agent to finish or remove "
-            f"{LOCK_FILE} if it is stale. (Disable locking with VAULT_LOCK=0.)",
-            policy="VAULT_LOCK",
-        )
-    return {"agent": holder, "age_min": age}
+    if lock_path.exists():
+        age = _lock_age_minutes(lock_path)
+        holder = parse_lock(lock_path).get("agent", "unknown")
+        if age <= LOCK_MAX_AGE_MIN and holder != actor:
+            raise PolicyViolationError(
+                f"Vault is locked by '{holder}' (lock age {age:.0f} min, max "
+                f"{LOCK_MAX_AGE_MIN}). Wait for the other agent to finish or remove "
+                f"{LOCK_FILE} if it is stale. (Disable locking with VAULT_LOCK=0.)",
+                policy="VAULT_LOCK",
+            )
+        info = {"agent": holder, "age_min": age}
+    for lk in _scope_locks(vault_root):
+        if lk["agent"] == actor:
+            continue
+        if rel_path is None or scope_covers(lk["scope"], rel_path):
+            purpose = f", purpose '{lk['purpose']}'" if lk.get("purpose") else ""
+            target = rel_path or "the vault"
+            raise PolicyViolationError(
+                f"'{target}' is locked by '{lk['agent']}' (scope '{lk['scope']}'"
+                f"{purpose}, expires in {lk['remaining_min']:.0f} min). Work outside "
+                "that scope, wait until the lock is released or expires, or ask "
+                f"'{lk['agent']}' to release it. (lock_status lists all locks.)",
+                policy="VAULT_LOCK",
+            )
+    return info
 
 
 def acquire_lock(vault_root: Path, scope: str = "", actor: str | None = None) -> dict:
@@ -347,6 +376,270 @@ def release_lock(vault_root: Path, actor: str | None = None) -> bool:
         lock_path.unlink(missing_ok=True)
         return True
     return False
+
+
+# ---- 4b. scope locks ---------------------------------------------------
+#
+# One file per actor under .vault-lock.d/ (single writer per file, like the
+# write-log shards, so Syncthing never has to merge two writers). Each file
+# holds that actor's active scopes with their own expiry. Taking a lock is
+# check-and-write under an exclusive guard file, so two server processes on
+# the same host cannot both lock overlapping scopes.
+
+LOCK_DIR = ".vault-lock.d"
+LOCK_GUARD = ".guard"
+LOCK_TTL_DEFAULT_MIN = 30
+LOCK_TTL_MAX_MIN = 240
+LOCK_MAX_SCOPES = 20
+WHOLE_VAULT = "*"
+
+
+def _utcnow() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def normalize_scope(scope: str | None) -> str:
+    """Validate a lock scope: a vault-relative folder or note path, or '*'."""
+    s = (scope or "").strip().replace("\\", "/").strip("/")
+    if s == WHOLE_VAULT:
+        return s
+    if not s:
+        raise ValueError(
+            "scope must not be empty: name a folder or note (e.g. 'wiki/log' or "
+            "'wiki/log/2026-11.md'), or '*' for the whole vault."
+        )
+    if len(s) > 300:
+        raise ValueError("scope is too long (max 300 characters).")
+    segments = s.split("/")
+    if any(seg in {"", ".", ".."} for seg in segments):
+        raise ValueError(f"scope must be a plain vault-relative path: {scope!r}")
+    return s
+
+
+def scope_covers(scope: str, rel_path: str) -> bool:
+    """True when ``rel_path`` lies inside ``scope`` (case-insensitive).
+
+    A scope covers itself, everything below it as a folder, and, when it has
+    no suffix, the note '<scope>.md'.
+    """
+    if scope == WHOLE_VAULT:
+        return True
+    sc = scope.replace("\\", "/").strip("/").casefold()
+    p = rel_path.replace("\\", "/").strip("/").casefold()
+    if p == sc or p.startswith(sc + "/"):
+        return True
+    return not Path(sc).suffix and p == sc + ".md"
+
+
+def scopes_overlap(a: str, b: str) -> bool:
+    return scope_covers(a, b) or scope_covers(b, a)
+
+
+def _actor_lock_path(vault_root: Path, actor: str) -> Path:
+    return vault_root / LOCK_DIR / (_sanitize_actor(actor) + ".json")
+
+
+def _parse_ts(value) -> datetime.datetime | None:
+    try:
+        ts = datetime.datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=datetime.timezone.utc)
+    return ts
+
+
+def _read_actor_file(path: Path) -> list[dict]:
+    """Return the raw lock entries of one actor file (tolerant)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    agent = str(data.get("agent", "") or "")
+    out = []
+    for e in data.get("locks", []) or []:
+        if isinstance(e, dict) and e.get("scope"):
+            e = dict(e)
+            e["agent"] = agent
+            out.append(e)
+    return out
+
+
+def _scope_locks(vault_root: Path, now: datetime.datetime | None = None) -> list[dict]:
+    """All active (not expired) scope locks of all actors."""
+    lock_dir = vault_root / LOCK_DIR
+    if not lock_dir.is_dir():
+        return []
+    now = now or _utcnow()
+    out = []
+    for f in sorted(lock_dir.glob("*.json")):
+        for e in _read_actor_file(f):
+            exp = _parse_ts(e.get("expires"))
+            if exp is None or exp <= now:
+                continue
+            out.append({
+                "agent": e["agent"],
+                "scope": str(e["scope"]),
+                "purpose": str(e.get("purpose", "") or ""),
+                "acquired": str(e.get("acquired", "") or ""),
+                "expires": exp.isoformat(),
+                "remaining_min": round((exp - now).total_seconds() / 60.0, 1),
+            })
+    return out
+
+
+@contextlib.contextmanager
+def _lock_guard(vault_root: Path):
+    lock_dir = vault_root / LOCK_DIR
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with open(lock_dir / LOCK_GUARD, "a+") as fh:
+        _lock_exclusive(fh)
+        try:
+            yield
+        finally:
+            _unlock(fh)
+
+
+def _write_actor_file(vault_root: Path, actor: str, entries: list[dict]) -> None:
+    path = _actor_lock_path(vault_root, actor)
+    if not entries:
+        path.unlink(missing_ok=True)
+        return
+    clean = [{k: v for k, v in e.items() if k != "agent"} for e in entries]
+    data = {"agent": actor, "locks": clean}
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _check_ttl(ttl_min) -> int:
+    try:
+        ttl = int(ttl_min)
+    except (TypeError, ValueError):
+        raise ValueError("ttl_min must be a whole number of minutes.")
+    if not 1 <= ttl <= LOCK_TTL_MAX_MIN:
+        raise ValueError(f"ttl_min must be between 1 and {LOCK_TTL_MAX_MIN} minutes.")
+    return ttl
+
+
+def _own_active(vault_root: Path, actor: str, now: datetime.datetime) -> list[dict]:
+    entries = _read_actor_file(_actor_lock_path(vault_root, actor))
+    return [e for e in entries if (_parse_ts(e.get("expires")) or now) > now]
+
+
+def lock_scope(
+    vault_root: Path,
+    scope: str,
+    purpose: str = "",
+    ttl_min: int = LOCK_TTL_DEFAULT_MIN,
+    actor: str | None = None,
+) -> dict:
+    """Lock a folder or note for this actor. Re-locking an own scope refreshes it.
+
+    Raises PolicyViolationError when a foreign active lock overlaps the scope
+    (or a fresh legacy .vault-lock of another actor exists).
+    """
+    actor = actor or os.environ.get("VAULT_ACTOR", "unknown")
+    scope = normalize_scope(scope)
+    ttl = _check_ttl(ttl_min)
+    purpose = (purpose or "").strip()[:200]
+    with _lock_guard(vault_root):
+        now = _utcnow()
+        legacy = vault_root / LOCK_FILE
+        if legacy.exists() and _lock_age_minutes(legacy) <= LOCK_MAX_AGE_MIN:
+            holder = parse_lock(legacy).get("agent", "unknown")
+            if holder != actor:
+                raise PolicyViolationError(
+                    f"Vault is locked by '{holder}' via {LOCK_FILE}; no scope lock "
+                    "can be taken until it is released or stale.",
+                    policy="VAULT_LOCK",
+                )
+        for lk in _scope_locks(vault_root, now):
+            if lk["agent"] != actor and scopes_overlap(lk["scope"], scope):
+                raise PolicyViolationError(
+                    f"Scope '{scope}' overlaps '{lk['scope']}', locked by "
+                    f"'{lk['agent']}' (expires in {lk['remaining_min']:.0f} min). "
+                    "Choose a scope outside it or wait.",
+                    policy="VAULT_LOCK",
+                )
+        own = [e for e in _own_active(vault_root, actor, now) if e["scope"] != scope]
+        if len(own) >= LOCK_MAX_SCOPES:
+            raise ValueError(
+                f"At most {LOCK_MAX_SCOPES} scopes per actor; release finished ones first."
+            )
+        entry = {
+            "scope": scope,
+            "purpose": purpose,
+            "acquired": now.isoformat(),
+            "expires": (now + datetime.timedelta(minutes=ttl)).isoformat(),
+        }
+        _write_actor_file(vault_root, actor, own + [entry])
+    return {"agent": actor, **entry, "ttl_min": ttl}
+
+
+def refresh_scope_lock(
+    vault_root: Path,
+    scope: str = "",
+    ttl_min: int = LOCK_TTL_DEFAULT_MIN,
+    actor: str | None = None,
+) -> list[dict]:
+    """Extend this actor's active locks (all, or the one named) by ttl_min from now."""
+    actor = actor or os.environ.get("VAULT_ACTOR", "unknown")
+    ttl = _check_ttl(ttl_min)
+    want = normalize_scope(scope) if (scope or "").strip() else ""
+    with _lock_guard(vault_root):
+        now = _utcnow()
+        own = _own_active(vault_root, actor, now)
+        hit = [e for e in own if not want or e["scope"] == want]
+        if not hit:
+            raise ValueError(
+                f"No active lock of '{actor}'"
+                + (f" for scope '{want}'" if want else "")
+                + " to refresh (expired locks must be taken again with lock_scope)."
+            )
+        exp = (now + datetime.timedelta(minutes=ttl)).isoformat()
+        for e in hit:
+            e["expires"] = exp
+        _write_actor_file(vault_root, actor, own)
+    return [{"scope": e["scope"], "expires": e["expires"]} for e in hit]
+
+
+def release_scope_lock(
+    vault_root: Path, scope: str = "", actor: str | None = None
+) -> list[str]:
+    """Release this actor's locks (all, or the one named). Returns released scopes."""
+    actor = actor or os.environ.get("VAULT_ACTOR", "unknown")
+    want = normalize_scope(scope) if (scope or "").strip() else ""
+    with _lock_guard(vault_root):
+        now = _utcnow()
+        own = _own_active(vault_root, actor, now)
+        released = [e["scope"] for e in own if not want or e["scope"] == want]
+        keep = [e for e in own if want and e["scope"] != want]
+        _write_actor_file(vault_root, actor, keep)
+    return released
+
+
+def lock_status(vault_root: Path, actor: str | None = None) -> dict:
+    """List all active locks: scope locks of every actor plus a fresh legacy lock."""
+    actor = actor or os.environ.get("VAULT_ACTOR", "unknown")
+    locks = _scope_locks(vault_root)
+    legacy = vault_root / LOCK_FILE
+    if legacy.exists():
+        age = _lock_age_minutes(legacy)
+        if age <= LOCK_MAX_AGE_MIN:
+            info = parse_lock(legacy)
+            locks.append({
+                "agent": info.get("agent", "unknown"),
+                "scope": WHOLE_VAULT,
+                "purpose": str(info.get("scope", "") or ""),
+                "acquired": str(info.get("started", "") or ""),
+                "expires": "",
+                "remaining_min": round(LOCK_MAX_AGE_MIN - age, 1),
+                "legacy": True,
+            })
+    return {"actor": actor, "enabled": _flag("VAULT_LOCK"), "locks": locks}
 
 
 # ---- 5. wiki index upkeep ----------------------------------------------
