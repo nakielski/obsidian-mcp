@@ -20,7 +20,6 @@ import base64
 import binascii
 import datetime
 import hashlib
-import mimetypes
 import os
 import re
 import tarfile
@@ -54,14 +53,27 @@ _EXEC_MAGIC = (
 _ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06")
 _TEXT_TYPES = frozenset({".csv", ".txt", ".md", ".eml", ".svg"})
 _EMBEDDABLE = frozenset({".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"})
-_MIME_FALLBACK = {
+# Fixed map: mimetypes.guess_type() reads the Windows registry and returns
+# platform-dependent values (e.g. application/x-zip-compressed for .zip).
+_MIME_TYPES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".csv": "text/csv",
+    ".txt": "text/plain",
     ".md": "text/markdown",
     ".msg": "application/vnd.ms-outlook",
     ".eml": "message/rfc822",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".zip": "application/zip",
     ".7z": "application/x-7z-compressed",
     ".tar.gz": "application/gzip",
-    ".webp": "image/webp",
-    ".csv": "text/csv",
 }
 _DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[_ -]+")
 
@@ -184,10 +196,7 @@ def _check_archive_members(ext: str, path: Path | None, data: bytes | None) -> N
 
 
 def mime_type(ext: str) -> str:
-    if ext in _MIME_FALLBACK:
-        return _MIME_FALLBACK[ext]
-    guessed, _ = mimetypes.guess_type("x" + ext)
-    return guessed or "application/octet-stream"
+    return _MIME_TYPES.get(ext, "application/octet-stream")
 
 
 def sha256_file(path: Path) -> str:

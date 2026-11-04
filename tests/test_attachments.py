@@ -204,6 +204,13 @@ class TestRefusals:
         assert attachments.decode_base64("data:application/pdf;base64," + base64.b64encode(PDF).decode()) == PDF
 
 
+class TestMime:
+    def test_every_allowed_type_has_a_fixed_mime(self):
+        for ext in attachments.ALLOWED_EXTENSIONS:
+            assert attachments.mime_type(ext) != "application/octet-stream", ext
+        assert attachments.mime_type(".zip") == "application/zip"
+
+
 class TestListAndInfo:
     def test_list_filters_and_info(self, vault):
         a = vault.attach_file(filename="Rechnung.pdf", content=PDF, description="Telekom Oktober",
