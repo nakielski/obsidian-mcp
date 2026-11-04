@@ -47,7 +47,7 @@ SERVER_INSTRUCTIONS = (
     "several files of one area, take lock_scope on that folder and release_lock "
     "when done; lock_status shows who holds what. Original files (PDF, Office, "
     "images, mails, archives) are stored only with attach_file, which files them "
-    "under raw/attachments/ with a companion note."
+    "under raw/assets/ with a companion note."
 )
 
 mcp = FastMCP("obsidian-mcp", instructions=SERVER_INSTRUCTIONS)
@@ -763,7 +763,7 @@ def attach_file(
     source_path: str = Field(
         default="",
         description="Vault-relative path of a file already in the vault (max 100 MB), "
-        "e.g. '00 Inbox/scan.pdf'. It is MOVED into raw/attachments/ unless keep_source.",
+        "e.g. '00 Inbox/scan.pdf'. It is MOVED into raw/assets/ unless keep_source.",
     ),
     description: str = Field(
         default="",
@@ -792,7 +792,7 @@ def attach_file(
     """Store an original file (PDF, Office, image, mail, archive) in the vault.
 
     Rule 12: attachments go ONLY through this tool. The file lands in
-    raw/attachments/<YYYY>/<MM>/<YYYY-MM-DD>_<name>.<ext> together with a
+    raw/assets/<YYYY>/<MM>/<YYYY-MM-DD>_<name>.<ext> together with a
     companion note '<file>.md' (uid att-..., SHA-256, original name, MIME, size,
     origin, related, description). Both are raw/ and immutable afterwards; link
     the companion note from wiki/ or PARA notes.
@@ -848,7 +848,7 @@ def list_attachments(
 def read_attachment_info(
     path: str = Field(
         description="Attachment file path or its companion note path, e.g. "
-        "'raw/attachments/2026/11/2026-11-04_rechnung.pdf'."
+        "'raw/assets/2026/11/2026-11-04_rechnung.pdf'."
     ),
     verify: bool = Field(
         default=False,

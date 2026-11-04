@@ -49,7 +49,7 @@ class TestAttach:
             filename="Rechnung Oktober.pdf", content=PDF, description="Telekom Rechnung Oktober.",
             source="E-Mail Telekom", related=["ent-telekom"], today=DAY,
         )
-        assert info["file"] == "raw/attachments/2026/11/2026-11-04_rechnung-oktober.pdf"
+        assert info["file"] == "raw/assets/2026/11/2026-11-04_rechnung-oktober.pdf"
         assert info["note"] == info["file"] + ".md"
         assert (vault.root / info["file"]).read_bytes() == PDF
         post = frontmatter.load(vault.root / info["note"])
@@ -70,7 +70,7 @@ class TestAttach:
         first = vault.attach_file(filename="a.pdf", content=PDF, today=DAY)
         second = vault.attach_file(filename="anders.pdf", content=PDF, today=DAY)
         assert second["duplicate"] is True and second["file"] == first["file"]
-        assert len(list((vault.root / "raw/attachments/2026/11").iterdir())) == 2
+        assert len(list((vault.root / "raw/assets/2026/11").iterdir())) == 2
 
     def test_name_collision_gets_suffix(self, vault):
         a = vault.attach_file(filename="scan.png", content=PNG, today=DAY)
@@ -114,11 +114,11 @@ class TestAttach:
             vault.update(info["note"], "anders")
 
     def test_respects_foreign_scope_lock(self, vault):
-        policies.lock_scope(vault.root, "raw/attachments", actor="codex")
+        policies.lock_scope(vault.root, "raw/assets", actor="codex")
         with pytest.raises(policies.PolicyViolationError):
             vault.attach_file(filename="a.pdf", content=PDF, today=DAY)
-        assert not (vault.root / "raw/attachments/2026").exists() or not any(
-            (vault.root / "raw/attachments/2026").rglob("*")
+        assert not (vault.root / "raw/assets/2026").exists() or not any(
+            (vault.root / "raw/assets/2026").rglob("*")
         )
 
     def test_failed_note_rolls_back_moved_file(self, vault, monkeypatch):
@@ -132,7 +132,7 @@ class TestAttach:
         with pytest.raises(OSError):
             vault.attach_file(source_path="00 Inbox/a.pdf", today=DAY)
         assert src.read_bytes() == PDF
-        assert not list((vault.root / "raw/attachments/2026/11").glob("*.pdf"))
+        assert not list((vault.root / "raw/assets/2026/11").glob("*.pdf"))
 
 
 class TestRefusals:
@@ -218,7 +218,7 @@ class TestListAndInfo:
         (vault.root / a["file"]).write_bytes(PDF + b"x")
         assert vault.attachment_info(a["file"], verify=True)["integrity"] == "mismatch"
         with pytest.raises(FileNotFoundError):
-            vault.attachment_info("raw/attachments/2026/11/fehlt.pdf")
+            vault.attachment_info("raw/assets/2026/11/fehlt.pdf")
 
     def test_companion_note_is_searchable(self, vault):
         vault.attach_file(filename="Vertrag.pdf", content=PDF, description="Mietvertrag Garage", today=DAY)
@@ -238,7 +238,7 @@ class TestToolsOverMcp:
         set_vault(vault)
         out = self._run("attach_file", filename="Plan.pdf", content_base64=base64.b64encode(PDF).decode(),
                         description="Bauplan", related_to="ent-20261104-bau")
-        assert out["duplicate"] is False and out["file"].startswith("raw/attachments/")
+        assert out["duplicate"] is False and out["file"].startswith("raw/assets/")
         assert all(e["related_to"] == "ent-20261104-bau" for e in _shard(vault.root))
         lst = self._run("list_attachments")
         assert lst["attachments"][0]["file"] == out["file"]

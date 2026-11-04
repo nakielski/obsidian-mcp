@@ -977,7 +977,7 @@ class Vault:
         keep_source: bool = False,
         today: datetime.date | None = None,
     ) -> dict:
-        """File an original document under raw/attachments/ with a companion note.
+        """File an original document under raw/assets/ with a companion note.
 
         Exactly one of ``content`` (bytes) or ``source_path`` (a file already in
         the vault, e.g. '00 Inbox/scan.pdf') is required. A source file is moved

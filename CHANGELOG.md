@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.vault-lock` keeps working. Every write path checks the resolved target
   (archive checks source and target).
 - Attachments: `attach_file`, `list_attachments`, `read_attachment_info`.
-  Original files go to `raw/attachments/<YYYY>/<MM>/<YYYY-MM-DD>_<name>.<ext>`
+  Original files go to `raw/assets/<YYYY>/<MM>/<YYYY-MM-DD>_<name>.<ext>`
   with a companion note `<file>.md` (uid `att-…`, SHA-256, original name,
   MIME, size, origin, related, description). Same content is stored once.
   Type allow-list with content check; executables are always refused, also

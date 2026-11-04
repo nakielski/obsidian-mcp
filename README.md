@@ -46,7 +46,7 @@ via the Model Context Protocol.
   takes an optional `related_to` (work-item uid) that lands in the log line
 - archive_note: archive-instead-of-delete with backlink reporting
 - Attachments: original files (PDF, Office, images, mails, archives) filed under
-  `raw/attachments/<YYYY>/<MM>/` with a companion note, SHA-256 deduplication and
+  `raw/assets/<YYYY>/<MM>/` with a companion note, SHA-256 deduplication and
   a type allow-list that always refuses executables
 - Incremental Whoosh full-text index (BM25, stemmed, field queries, fuzzy,
   did-you-mean) with configurable index directory
@@ -135,7 +135,7 @@ The server runs on stdio. Register it with your client's standard MCP configurat
 | `refresh_lock(scope?, ttl_min?)` | Extend own active locks |
 | `release_lock(scope?)` | Release own locks |
 | `lock_status()` | List all active locks of all agents |
-| `attach_file(filename?, content_base64? \| source_path?, description?, name?, source?, related?, keep_source?)` | File an original document under `raw/attachments/` with a companion note |
+| `attach_file(filename?, content_base64? \| source_path?, description?, name?, source?, related?, keep_source?)` | File an original document under `raw/assets/` with a companion note |
 | `list_attachments(query?, related?, limit?)` | List filed attachments, newest first |
 | `read_attachment_info(path, verify?)` | Metadata of one attachment, optional SHA-256 check |
 | `search_query(query, limit?, include_restricted?)` | Ranked Lucene-style full-text query (fields, fuzzy, ranges) |

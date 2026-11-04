@@ -2,7 +2,7 @@
 
 Rule set (vault rule 12):
 
-- Every attachment lives in ``raw/attachments/<YYYY>/<MM>/`` and is named
+- Every attachment lives in ``raw/assets/<YYYY>/<MM>/`` and is named
   ``<YYYY-MM-DD>_<name>.<ext>`` (filing date, lowercase slug).
 - Every attachment gets a companion note ``<file>.md`` next to it with uid,
   SHA-256, original name, MIME type, size, origin, related items and a
@@ -32,7 +32,7 @@ import frontmatter
 
 from . import policies
 
-ATTACH_ROOT = "raw/attachments"
+ATTACH_ROOT = "raw/assets"
 UID_PREFIX = "att-"
 
 ALLOWED_EXTENSIONS = (
