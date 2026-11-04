@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Scope locks: `lock_scope`, `refresh_lock`, `release_lock` and `lock_status`.
+  A lock covers a folder or a note (or `*` for the whole vault) and blocks only
+  writes of other agents into that scope; it expires after `ttl_min` (default
+  30, max 240). One file per agent under `.vault-lock.d/`, taken under an
+  exclusive guard so two processes cannot lock overlapping scopes. The legacy
+  `.vault-lock` keeps working. Every write path checks the resolved target
+  (archive checks source and target).
+- Attachments: `attach_file`, `list_attachments`, `read_attachment_info`.
+  Original files go to `raw/assets/<YYYY>/<MM>/<YYYY-MM-DD>_<name>.<ext>`
+  with a companion note `<file>.md` (uid `att-…`, SHA-256, original name,
+  MIME, size, origin, related, description). Same content is stored once.
+  Type allow-list with content check; executables are always refused, also
+  inside zip/tar archives. File and note are logged like any other write.
+
+### Fixed
+- Notes without frontmatter stay without it: append, patch and the other
+  edits wrote an empty `---\n{}\n---` block in front of the body.
+
+### Added
 - `manage_frontmatter` handles several keys in one call: `values={...}` for
   `set` (one write, one log line), `keys=[...]` for `get` and `delete` (up to
   50). One key works as before. A mapping passed as `value` now gets an error

@@ -43,7 +43,11 @@ SERVER_INSTRUCTIONS = (
     "its line to the write log (.vault-write-log.d/<actor>.jsonl) and writes under "
     "wiki/ keep wiki/index.json in sync. Never append write-log lines or edit "
     "wiki/index.json yourself, not even via the filesystem. To link the writes of "
-    "one task, pass the work item's uid as related_to."
+    "one task, pass the work item's uid as related_to. Before a task that touches "
+    "several files of one area, take lock_scope on that folder and release_lock "
+    "when done; lock_status shows who holds what. Original files (PDF, Office, "
+    "images, mails, archives) are stored only with attach_file, which files them "
+    "under raw/assets/ with a companion note."
 )
 
 mcp = FastMCP("obsidian-mcp", instructions=SERVER_INSTRUCTIONS)
@@ -212,6 +216,60 @@ class DeleteNoteOutput(BaseModel):
 class ArchiveNoteOutput(BaseModel):
     archived: str
     backlinks: list[str]
+
+class LockEntry(BaseModel):
+    agent: str
+    scope: str
+    purpose: str = ""
+    acquired: str = ""
+    expires: str = ""
+    remaining_min: float = 0.0
+    legacy: bool = False
+
+class LockScopeOutput(BaseModel):
+    agent: str
+    scope: str
+    purpose: str
+    acquired: str
+    expires: str
+    ttl_min: int
+
+class RefreshLockOutput(BaseModel):
+    refreshed: list[dict]
+
+class ReleaseLockOutput(BaseModel):
+    released: list[str]
+
+class LockStatusOutput(BaseModel):
+    actor: str
+    enabled: bool
+    locks: list[LockEntry]
+
+class AttachmentInfo(BaseModel):
+    file: str
+    note: str
+    uid: str
+    original_name: str
+    mime: str
+    size_bytes: int
+    sha256: str
+    source: str = ""
+    related: list[str] = []
+    created: str = ""
+    actor: str = ""
+    description: str = ""
+
+class AttachFileOutput(AttachmentInfo):
+    duplicate: bool
+    source_moved_from: str = ""
+    source_kept: bool = False
+
+class ListAttachmentsOutput(BaseModel):
+    attachments: list[AttachmentInfo]
+
+class AttachmentInfoOutput(AttachmentInfo):
+    exists: bool
+    integrity: str = ""
 
 class SearchQueryItem(BaseModel):
     path: str
@@ -599,6 +657,211 @@ def archive_note(
         with policies.related_context(related_to):
             target, incoming = v.archive(path, archive_dir)
         return {"archived": target, "backlinks": incoming}
+    except Exception as e:
+        raise _to_mcp_error(e)
+
+
+# ---- locks (rule 6) -----------------------------------------------------
+
+@mcp.tool()
+def lock_scope(
+    scope: str = Field(
+        description="Folder or note to lock, vault-relative. Examples: 'wiki/log', "
+        "'wiki/log/2026-11.md', '04 Projects/Belegarchiv'. '*' locks the whole vault "
+        "(only for vault-wide restructuring)."
+    ),
+    purpose: str = Field(
+        default="",
+        description="Short reason shown to other agents, e.g. 'monthly log rollover'.",
+    ),
+    ttl_min: int = Field(
+        default=30,
+        description="Minutes until the lock expires on its own (1-240, default 30). "
+        "Extend long tasks with refresh_lock.",
+    ),
+) -> LockScopeOutput:
+    """Lock a folder or note for this agent before a multi-file task.
+
+    While the lock is active, writes of OTHER agents into this scope are refused
+    (VAULT_LOCK); writes elsewhere and reads stay possible. Your own writes are
+    never blocked. Calling it again for the same scope refreshes it.
+
+    Rule 6: lock before touching several files of one area, release when done.
+    Fails with VAULT_LOCK if another agent holds an overlapping scope.
+
+    Side effects: writes .vault-lock.d/<actor>.json (no note is changed).
+    """
+    try:
+        return policies.lock_scope(_get_vault().root, scope, purpose, ttl_min)
+    except Exception as e:
+        raise _to_mcp_error(e)
+
+
+@mcp.tool()
+def refresh_lock(
+    scope: str = Field(
+        default="",
+        description="Scope to extend; empty extends all of this agent's active locks.",
+    ),
+    ttl_min: int = Field(default=30, description="New lifetime from now in minutes (1-240)."),
+) -> RefreshLockOutput:
+    """Extend this agent's active lock(s) so a long task keeps its scope.
+
+    Returns {"refreshed": [{"scope", "expires"}]}. Fails if no matching active
+    lock exists (an expired lock has to be taken again with lock_scope).
+    """
+    try:
+        return {"refreshed": policies.refresh_scope_lock(_get_vault().root, scope, ttl_min)}
+    except Exception as e:
+        raise _to_mcp_error(e)
+
+
+@mcp.tool()
+def release_lock(
+    scope: str = Field(
+        default="",
+        description="Scope to release; empty releases all of this agent's locks.",
+    ),
+) -> ReleaseLockOutput:
+    """Release this agent's lock(s) when the task is done.
+
+    Returns {"released": ["<scope>", ...]} (empty when nothing was held).
+    Only own locks can be released.
+    """
+    try:
+        return {"released": policies.release_scope_lock(_get_vault().root, scope)}
+    except Exception as e:
+        raise _to_mcp_error(e)
+
+
+@mcp.tool()
+def lock_status() -> LockStatusOutput:
+    """List all active vault locks of all agents (scope, holder, purpose, expiry).
+
+    Use it before a multi-file task and when a write was refused with
+    VAULT_LOCK. Expired locks are not listed and no longer block anything.
+    """
+    try:
+        return policies.lock_status(_get_vault().root)
+    except Exception as e:
+        raise _to_mcp_error(e)
+
+
+# ---- attachments (rule 12) ----------------------------------------------
+
+@mcp.tool()
+def attach_file(
+    filename: str = Field(
+        default="",
+        description="Original file name incl. extension, e.g. 'Rechnung Oktober.pdf'. "
+        "Required with content_base64; with source_path it defaults to that file's name.",
+    ),
+    content_base64: str = Field(
+        default="",
+        description="File content as base64 (max 10 MB). Use source_path for larger files.",
+    ),
+    source_path: str = Field(
+        default="",
+        description="Vault-relative path of a file already in the vault (max 100 MB), "
+        "e.g. '00 Inbox/scan.pdf'. It is MOVED into raw/assets/ unless keep_source.",
+    ),
+    description: str = Field(
+        default="",
+        description="What the file is and why it is kept (1-3 sentences). Goes into the "
+        "companion note and makes the file findable. Strongly recommended.",
+    ),
+    name: str = Field(
+        default="",
+        description="Optional short name for the stored file instead of the original "
+        "name, e.g. 'rechnung-telekom-oktober'. Date prefix and extension are added.",
+    ),
+    source: str = Field(
+        default="",
+        description="Origin of the file, e.g. 'E-Mail Telekom 2026-11-02' or 'Scan'.",
+    ),
+    related: list[str] | None = Field(
+        default=None,
+        description="Uids or [[wikilinks]] of notes this file belongs to.",
+    ),
+    keep_source: bool = Field(
+        default=False,
+        description="With source_path: copy instead of move (default: move).",
+    ),
+    related_to: str = _related_to_field(),
+) -> AttachFileOutput:
+    """Store an original file (PDF, Office, image, mail, archive) in the vault.
+
+    Rule 12: attachments go ONLY through this tool. The file lands in
+    raw/assets/<YYYY>/<MM>/<YYYY-MM-DD>_<name>.<ext> together with a
+    companion note '<file>.md' (uid att-..., SHA-256, original name, MIME, size,
+    origin, related, description). Both are raw/ and immutable afterwards; link
+    the companion note from wiki/ or PARA notes.
+
+    Allowed: pdf, docx, xlsx, pptx, csv, txt, md, msg, eml, png, jpg, jpeg, gif,
+    webp, svg, zip, 7z, tar.gz. Executables are always refused (POLICY
+    ATTACHMENT_TYPE), also inside zip/tar archives or behind a wrong extension.
+    Identical content is stored once: then duplicate=true and the existing
+    attachment is returned, nothing is written and a source file stays where it is.
+
+    Returns the attachment summary with file and note paths.
+    Side effects: WRITES the file and its companion note, logs both.
+    """
+    try:
+        data = None
+        if content_base64.strip():
+            from . import attachments as _att
+            data = _att.decode_base64(content_base64)
+        with policies.related_context(related_to):
+            return _get_vault().attach_file(
+                filename=filename, content=data, source_path=source_path, name=name,
+                description=description, source=source, related=related,
+                keep_source=keep_source,
+            )
+    except Exception as e:
+        raise _to_mcp_error(e)
+
+
+@mcp.tool()
+def list_attachments(
+    query: str = Field(
+        default="",
+        description="Optional text filter on file name, original name, description, origin.",
+    ),
+    related: str = Field(
+        default="",
+        description="Optional filter: only attachments whose related list contains this uid or link text.",
+    ),
+    limit: int = Field(default=50, description="Maximum results (1-500, default 50)."),
+) -> ListAttachmentsOutput:
+    """List filed attachments (newest first) from their companion notes.
+
+    Read-only. Returns {"attachments": [{file, note, uid, original_name, mime,
+    size_bytes, sha256, source, related, created, actor, description}]}.
+    """
+    try:
+        return {"attachments": _get_vault().list_attachments(query, related, limit)}
+    except Exception as e:
+        raise _to_mcp_error(e)
+
+
+@mcp.tool()
+def read_attachment_info(
+    path: str = Field(
+        description="Attachment file path or its companion note path, e.g. "
+        "'raw/assets/2026/11/2026-11-04_rechnung.pdf'."
+    ),
+    verify: bool = Field(
+        default=False,
+        description="Recompute the SHA-256 and report integrity ok/mismatch/missing.",
+    ),
+) -> AttachmentInfoOutput:
+    """Show the metadata of one attachment and whether its file exists.
+
+    Read-only. The file content itself is not returned; open the file in
+    Obsidian or with a file tool.
+    """
+    try:
+        return _get_vault().attachment_info(path, verify)
     except Exception as e:
         raise _to_mcp_error(e)
 

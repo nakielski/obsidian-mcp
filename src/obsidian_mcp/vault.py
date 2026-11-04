@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import os
 import re
 import threading
@@ -31,6 +32,18 @@ class Note:
 
 
 # ---- serialization helpers ---------------------------------------------
+
+
+def _dumps(post) -> str:
+    """Serialize a note; without metadata write the body only.
+
+    python-frontmatter renders empty metadata as '---\\n{}\\n---', which
+    turned notes without frontmatter into notes with an empty block on the
+    first append or edit.
+    """
+    if not post.metadata:
+        return post.content
+    return frontmatter.dumps(post)
 
 def _require_wiki_uid(rel_path: str, metadata: dict) -> None:
     """Reject wiki note creation without a non-empty uid field.
@@ -242,7 +255,8 @@ class Vault:
         {
             ".vault-write-log.jsonl",  # legacy audit log (write path)
             ".vault-write-log.d",      # per-actor audit shards
-            ".vault-lock",             # advisory lock file
+            ".vault-lock",             # legacy vault-wide lock file
+            ".vault-lock.d",           # per-actor scope locks
             ".obsidian-mcp-index",     # Whoosh index dir
             ".obsidian",               # Obsidian app config dir (any depth)
         }
@@ -487,8 +501,8 @@ class Vault:
         return out
 
     def create(self, rel_path: str, content: str, tags: list[str] | None = None) -> Note:
-        policies.assert_no_foreign_lock(self.root)
         p, norm = self._resolve(rel_path)
+        policies.assert_no_foreign_lock(self.root, norm)
         if p.exists():
             raise FileExistsError(f"Note already exists: {rel_path}")
         # Parse FM before mkdir so a rejected create leaves no files or directories.
@@ -507,20 +521,20 @@ class Vault:
         _require_wiki_uid(norm, dict(post.metadata))
         # Reject oversized content BEFORE writing — an orphan file that
         # no tool can read back would otherwise be left on disk.
-        if len(frontmatter.dumps(post).encode("utf-8")) > _MAX_NOTE_BYTES:
+        if len(_dumps(post).encode("utf-8")) > _MAX_NOTE_BYTES:
             raise ValueError(
                 f"Note exceeds the {_MAX_NOTE_BYTES // (1024 * 1024)} MiB size cap: {rel_path}"
             )
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(frontmatter.dumps(post), encoding="utf-8")
+        p.write_text(_dumps(post), encoding="utf-8")
         note = load_note(p, self.root)
         self._after_write(norm, "create", note)
         return note
 
     def update(self, rel_path: str, content: str) -> Note:
         with self._rw_lock:
-            policies.assert_no_foreign_lock(self.root)
             p, norm = self._resolve(rel_path)
+            policies.assert_no_foreign_lock(self.root, norm)
             policies.assert_mutable(norm)
             if not p.exists():
                 raise FileNotFoundError(f"Note not found: {rel_path}")
@@ -530,19 +544,19 @@ class Vault:
             post.content = content
             # Cap BEFORE writing — writing first made the note
             # permanently unreadable (load_note then always raises).
-            if len(frontmatter.dumps(post).encode("utf-8")) > _MAX_NOTE_BYTES:
+            if len(_dumps(post).encode("utf-8")) > _MAX_NOTE_BYTES:
                 raise ValueError(
                     f"Note exceeds the {_MAX_NOTE_BYTES // (1024 * 1024)} MiB size cap: {rel_path}"
                 )
-            p.write_text(frontmatter.dumps(post), encoding="utf-8")
+            p.write_text(_dumps(post), encoding="utf-8")
             note = load_note(p, self.root)
             self._after_write(norm, "modify", note)
             return note
 
     def delete(self, rel_path: str) -> str:
         """Permanently delete a note. Returns the vault-relative path."""
-        policies.assert_no_foreign_lock(self.root)
         p, norm = self._resolve(rel_path)
+        policies.assert_no_foreign_lock(self.root, norm)
         policies.assert_mutable(norm)
         if not p.exists():
             raise FileNotFoundError(f"Note not found: {rel_path}")
@@ -560,8 +574,8 @@ class Vault:
     def append(self, rel_path: str, content: str) -> tuple[Note, bool]:
         with self._rw_lock:
             """Append content to an existing note, or create it if missing."""
-            policies.assert_no_foreign_lock(self.root)
             p, norm = self._resolve(rel_path)
+            policies.assert_no_foreign_lock(self.root, norm)
             created = False
             if p.exists():
                 if not p.is_file():
@@ -578,7 +592,7 @@ class Vault:
                     post.content = existing.rstrip("\n") + "\n" + content
                 else:
                     post.content = content
-                p.write_text(frontmatter.dumps(post), encoding="utf-8")
+                p.write_text(_dumps(post), encoding="utf-8")
             else:
                 if content.lstrip().startswith("---"):
                     post = frontmatter.loads(content)
@@ -586,7 +600,7 @@ class Vault:
                     post = frontmatter.Post(content)
                 _require_wiki_uid(norm, dict(post.metadata))
                 p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(frontmatter.dumps(post), encoding="utf-8")
+                p.write_text(_dumps(post), encoding="utf-8")
                 created = True
             note = load_note(p, self.root)
             self._after_write(norm, "create" if created else "modify", note)
@@ -607,8 +621,8 @@ class Vault:
     def set_frontmatter(self, rel_path: str, key: str, value) -> None:
         with self._rw_lock:
             """Set a frontmatter key while preserving body and other metadata."""
-            policies.assert_no_foreign_lock(self.root)
             p, norm = self._resolve(rel_path)
+            policies.assert_no_foreign_lock(self.root, norm)
             policies.assert_mutable(norm)
             if not p.exists():
                 raise FileNotFoundError(f"Note not found: {rel_path}")
@@ -616,14 +630,14 @@ class Vault:
                 raise ValueError(f"Not a file: {rel_path}")
             post = _load_capped(p)
             post[key] = value
-            p.write_text(frontmatter.dumps(post), encoding="utf-8")
+            p.write_text(_dumps(post), encoding="utf-8")
             self._after_write(norm, "modify", self.read(rel_path))
 
     def delete_frontmatter(self, rel_path: str, key: str) -> None:
         with self._rw_lock:
             """Delete a frontmatter key if present."""
-            policies.assert_no_foreign_lock(self.root)
             p, norm = self._resolve(rel_path)
+            policies.assert_no_foreign_lock(self.root, norm)
             policies.assert_mutable(norm)
             if not p.exists():
                 raise FileNotFoundError(f"Note not found: {rel_path}")
@@ -632,7 +646,7 @@ class Vault:
             post = _load_capped(p)
             if key in post.metadata:
                 del post.metadata[key]
-                p.write_text(frontmatter.dumps(post), encoding="utf-8")
+                p.write_text(_dumps(post), encoding="utf-8")
                 self._after_write(norm, "modify", self.read(rel_path))
 
     def update_frontmatter(self, rel_path: str, set_values: dict | None = None,
@@ -646,8 +660,8 @@ class Vault:
         set_values = set_values or {}
         delete_keys = delete_keys or []
         with self._rw_lock:
-            policies.assert_no_foreign_lock(self.root)
             p, norm = self._resolve(rel_path)
+            policies.assert_no_foreign_lock(self.root, norm)
             policies.assert_mutable(norm)
             if not p.exists():
                 raise FileNotFoundError(f"Note not found: {rel_path}")
@@ -660,7 +674,7 @@ class Vault:
             for k, v in set_values.items():
                 post[k] = v
             if set_values or deleted:
-                p.write_text(frontmatter.dumps(post), encoding="utf-8")
+                p.write_text(_dumps(post), encoding="utf-8")
                 self._after_write(norm, "modify", self.read(rel_path))
             return deleted
 
@@ -669,8 +683,8 @@ class Vault:
     def add_tags(self, rel_path: str, tags: list[str]) -> list[str]:
         with self._rw_lock:
             """Add tags to the frontmatter tags array (deduplicated, lowercase)."""
-            policies.assert_no_foreign_lock(self.root)
             p, norm = self._resolve(rel_path)
+            policies.assert_no_foreign_lock(self.root, norm)
             policies.assert_mutable(norm)
             if not p.exists():
                 raise FileNotFoundError(f"Note not found: {rel_path}")
@@ -681,15 +695,15 @@ class Vault:
                 if tl not in current:
                     current.append(tl)
             post.metadata["tags"] = current
-            p.write_text(frontmatter.dumps(post), encoding="utf-8")
+            p.write_text(_dumps(post), encoding="utf-8")
             self._after_write(norm, "modify", self.read(rel_path))
             return current
 
     def remove_tags(self, rel_path: str, tags: list[str]) -> list[str]:
         with self._rw_lock:
             """Remove tags from the frontmatter tags array case-insensitively."""
-            policies.assert_no_foreign_lock(self.root)
             p, norm = self._resolve(rel_path)
+            policies.assert_no_foreign_lock(self.root, norm)
             policies.assert_mutable(norm)
             if not p.exists():
                 raise FileNotFoundError(f"Note not found: {rel_path}")
@@ -698,7 +712,7 @@ class Vault:
             remove_set = {t.lower() for t in tags}
             current = [t for t in current if t not in remove_set]
             post.metadata["tags"] = current
-            p.write_text(frontmatter.dumps(post), encoding="utf-8")
+            p.write_text(_dumps(post), encoding="utf-8")
             self._after_write(norm, "modify", self.read(rel_path))
             return current
 
@@ -767,8 +781,8 @@ class Vault:
             """Surgically edit the content under a heading."""
             if action not in {"append", "prepend", "replace"}:
                 raise ValueError(f"Invalid patch action: {action}")
-            policies.assert_no_foreign_lock(self.root)
             p, norm = self._resolve(rel_path)
+            policies.assert_no_foreign_lock(self.root, norm)
             policies.assert_mutable(norm)
             if not p.exists():
                 raise FileNotFoundError(f"Note not found: {rel_path}")
@@ -817,7 +831,7 @@ class Vault:
                 updated = lines[:start_idx + 1] + new_lines + lines[end_idx:]
 
             post.content = "\n".join(updated)
-            p.write_text(frontmatter.dumps(post), encoding="utf-8")
+            p.write_text(_dumps(post), encoding="utf-8")
             note = load_note(p, self.root)
             self._after_write(norm, "modify", note)
             return note
@@ -845,12 +859,13 @@ class Vault:
         Returns (archive_target, backlink_paths).
         """
         with self._rw_lock:
-            policies.assert_no_foreign_lock(self.root)
             note = self.read(rel_path)
             incoming = [b.path for b in self.get_backlinks(note.title)]
             target = policies.archive_target(rel_path, archive_dir)
             src, norm = self._resolve(rel_path)
-            dst, _ = self._resolve(target)
+            dst, dst_norm = self._resolve(target)
+            policies.assert_no_foreign_lock(self.root, norm)
+            policies.assert_no_foreign_lock(self.root, dst_norm)
             policies.assert_mutable(norm)
             if dst.exists():
                 raise FileExistsError(
@@ -898,8 +913,8 @@ class Vault:
                     f"Regex pattern too long (>{self._MAX_REGEX_LEN} chars); "
                     "keep patterns small and specific."
                 )
-            policies.assert_no_foreign_lock(self.root)
             p, norm = self._resolve(rel_path)
+            policies.assert_no_foreign_lock(self.root, norm)
             policies.assert_mutable(norm)
             if not p.exists():
                 raise FileNotFoundError(f"Note not found: {rel_path}")
@@ -944,9 +959,191 @@ class Vault:
                     pattern, lambda _m: replace, post.content, flags=flags_re
                 )
             post.content = new_content
-            p.write_text(frontmatter.dumps(post), encoding="utf-8")
+            p.write_text(_dumps(post), encoding="utf-8")
             self._after_write(norm, "modify", load_note(p, self.root))
             return new_content, count
+
+    # ---- attachments (rule 12) ----------------------------------------
+
+    def attach_file(
+        self,
+        filename: str = "",
+        content: bytes | None = None,
+        source_path: str = "",
+        name: str = "",
+        description: str = "",
+        source: str = "",
+        related: list[str] | None = None,
+        keep_source: bool = False,
+        today: datetime.date | None = None,
+    ) -> dict:
+        """File an original document under raw/assets/ with a companion note.
+
+        Exactly one of ``content`` (bytes) or ``source_path`` (a file already in
+        the vault, e.g. '00 Inbox/scan.pdf') is required. A source file is moved
+        into the attachment folder unless ``keep_source`` is set. Identical
+        content (SHA-256) is not stored twice: the existing attachment is
+        returned with duplicate=True and nothing is written.
+        """
+        from . import attachments as att
+
+        if (content is None) == (not source_path.strip()):
+            raise ValueError("Pass exactly one of content_base64 or source_path.")
+        related = [str(r).strip() for r in (related or []) if str(r).strip()]
+        if len(related) > 20:
+            raise ValueError("At most 20 related entries.")
+        description = (description or "").strip()
+        if len(description) > 4000:
+            raise ValueError("description is limited to 4000 characters.")
+        source = (source or "").strip()[:300]
+        with self._rw_lock:
+            src_abs = src_norm = None
+            if content is not None:
+                original = Path((filename or "").replace("\\", "/")).name.strip()
+                if not original:
+                    raise ValueError("filename is required with content_base64.")
+                ext = att.check_extension(original)
+                att.check_content(content[:8192], ext, data=content)
+                sha = hashlib.sha256(content).hexdigest()
+                size = len(content)
+            else:
+                src_abs, src_norm = self._resolve(source_path)
+                if not src_abs.is_file():
+                    raise FileNotFoundError(f"Source file not found: {source_path}")
+                if policies.classify_layer(src_norm) == "raw":
+                    raise ValueError(
+                        "source_path lies in raw/ already; attachments are filed from "
+                        "other folders such as 00 Inbox/."
+                    )
+                original = Path((filename or "").replace("\\", "/")).name.strip() or src_abs.name
+                ext = att.check_extension(original)
+                if src_abs.suffix.lower() == ".md":
+                    raise ValueError(
+                        "source_path is a note; notes are archived with archive_note, "
+                        "not filed as attachments."
+                    )
+                size = src_abs.stat().st_size
+                if size == 0:
+                    raise ValueError("Attachment is empty.")
+                if size > att.max_bytes():
+                    raise ValueError(
+                        f"File exceeds {att.max_bytes() // (1024 * 1024)} MB (ATTACH_MAX_MB)."
+                    )
+                with open(src_abs, "rb") as fh:
+                    head = fh.read(8192)
+                att.check_content(head, ext, path=src_abs)
+                sha = att.sha256_file(src_abs)
+
+            existing = att.find_by_sha(self.root, sha)
+            if existing is not None:
+                info = att.summary(*existing)
+                info.update({"duplicate": True, "source_kept": bool(source_path)})
+                return info
+
+            today = today or datetime.date.today()
+            folder = att.target_folder(today)
+            stem = att.slugify(name or att.split_extension(original)[0])
+            base = f"{today.isoformat()}_{stem}"
+            for n in range(1, 100):
+                candidate = base if n == 1 else f"{base}-{n}"
+                file_rel = f"{folder}/{candidate}{ext}"
+                note_rel = f"{file_rel}.md"
+                file_abs, file_norm = self._resolve(file_rel)
+                note_abs, note_norm = self._resolve(note_rel)
+                if not file_abs.exists() and not note_abs.exists():
+                    break
+            else:
+                raise FileExistsError(f"No free attachment name for {base}{ext}.")
+            policies.assert_no_foreign_lock(self.root, file_norm)
+            policies.assert_no_foreign_lock(self.root, note_norm)
+            if src_norm is not None and not keep_source:
+                policies.assert_no_foreign_lock(self.root, src_norm)
+
+            from . import plugins
+            actor = plugins.actor()
+            uid = f"att-{today:%Y%m%d}-{sha[:8]}"
+            created = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+            file_abs.parent.mkdir(parents=True, exist_ok=True)
+            moved = False
+            if content is not None:
+                tmp = file_abs.with_name(f".{file_abs.name}.part")
+                tmp.write_bytes(content)
+                os.replace(tmp, file_abs)
+            elif keep_source:
+                import shutil
+                tmp = file_abs.with_name(f".{file_abs.name}.part")
+                shutil.copyfile(src_abs, tmp)
+                os.replace(tmp, file_abs)
+            else:
+                src_abs.rename(file_abs)
+                moved = True
+            if att.sha256_file(file_abs) != sha:
+                # The source changed between hashing and filing: undo and refuse.
+                if moved:
+                    file_abs.rename(src_abs)
+                else:
+                    file_abs.unlink(missing_ok=True)
+                raise ValueError("File changed while it was filed; try again.")
+            sidecar = att.build_sidecar(
+                uid=uid, file_name=file_abs.name, ext=ext, original_name=original,
+                size=size, sha=sha, source=source or ("vault:" + src_norm if src_norm else ""),
+                related=related, description=description, actor=actor, created=created,
+            )
+            try:
+                self.create(note_norm, sidecar)
+            except Exception:
+                if moved:
+                    file_abs.rename(src_abs)
+                else:
+                    file_abs.unlink(missing_ok=True)
+                raise
+            policies.log_write(self.root, file_norm, "create", "raw", uid=uid)
+            if moved:
+                policies.log_write(self.root, src_norm, "move", policies.classify_layer(src_norm), uid=uid)
+            meta = att._sidecar_meta(note_abs) or {}
+            info = att.summary(note_norm, meta)
+            info.update({"duplicate": False, "source_moved_from": src_norm if moved else ""})
+            return info
+
+    def list_attachments(self, query: str = "", related: str = "", limit: int = 50) -> list[dict]:
+        """Companion-note summaries of filed attachments, newest first."""
+        from . import attachments as att
+
+        q = (query or "").strip().casefold()
+        rel = (related or "").strip().casefold()
+        out = []
+        for note_rel, meta in att.iter_sidecars(self.root):
+            info = att.summary(note_rel, meta)
+            if rel and not any(rel in r.casefold() for r in info["related"]):
+                continue
+            if q and q not in " ".join(
+                [info["file"], info["original_name"], info["description"], info["source"]]
+            ).casefold():
+                continue
+            out.append(info)
+        out.sort(key=lambda i: (i["created"], i["file"]), reverse=True)
+        return out[: max(1, min(int(limit or 50), 500))]
+
+    def attachment_info(self, path: str, verify: bool = False) -> dict:
+        """Metadata of one attachment, by file path or companion-note path."""
+        from . import attachments as att
+
+        p = path.strip().replace("\\", "/")
+        note_rel = p if p.lower().endswith(".md") and att.split_extension(p[:-3])[1] else p + ".md"
+        note_abs, note_norm = self._resolve(note_rel)
+        meta = att._sidecar_meta(note_abs) if note_abs.is_file() else None
+        if meta is None:
+            raise FileNotFoundError(f"No attachment with companion note at {note_rel}")
+        info = att.summary(note_norm, meta)
+        file_abs, _ = self._resolve(info["file"])
+        info["exists"] = file_abs.is_file()
+        if verify:
+            if not info["exists"]:
+                info["integrity"] = "missing"
+            else:
+                ok = att.sha256_file(file_abs) == info["sha256"]
+                info["integrity"] = "ok" if ok else "mismatch"
+        return info
 
     def get_backlinks(self, target_title: str, exclude_prefixes: tuple[str, ...] = ()) -> list[Note]:
         """Find notes linking to target via [[wikilinks]], including embeds."""
