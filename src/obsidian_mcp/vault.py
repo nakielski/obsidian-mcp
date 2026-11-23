@@ -979,9 +979,11 @@ class Vault:
     ) -> dict:
         """File an original document under raw/assets/ with a companion note.
 
-        Exactly one of ``content`` (bytes) or ``source_path`` (a file already in
-        the vault, e.g. '00 Inbox/scan.pdf') is required. A source file is moved
-        into the attachment folder unless ``keep_source`` is set. Identical
+        Exactly one of ``content`` (bytes) or ``source_path`` is required.
+        ``source_path`` is a file already in the vault (e.g. '00 Inbox/scan.pdf')
+        or an absolute path inside one of the import folders (ATTACH_IMPORT_DIRS,
+        e.g. the folder an agent writes generated images to). A source file is
+        moved into the attachment folder unless ``keep_source`` is set. Identical
         content (SHA-256) is not stored twice: the existing attachment is
         returned with duplicate=True and nothing is written.
         """
@@ -998,6 +1000,7 @@ class Vault:
         source = (source or "").strip()[:300]
         with self._rw_lock:
             src_abs = src_norm = None
+            external = False
             if content is not None:
                 original = Path((filename or "").replace("\\", "/")).name.strip()
                 if not original:
@@ -1007,10 +1010,15 @@ class Vault:
                 sha = hashlib.sha256(content).hexdigest()
                 size = len(content)
             else:
-                src_abs, src_norm = self._resolve(source_path)
+                external = att.is_import_path(source_path)
+                if external:
+                    # A file outside the vault: only from the configured import folders.
+                    src_abs = att.resolve_import(source_path)
+                else:
+                    src_abs, src_norm = self._resolve(source_path)
                 if not src_abs.is_file():
                     raise FileNotFoundError(f"Source file not found: {source_path}")
-                if policies.classify_layer(src_norm) == "raw":
+                if src_norm is not None and policies.classify_layer(src_norm) == "raw":
                     raise ValueError(
                         "source_path lies in raw/ already; attachments are filed from "
                         "other folders such as 00 Inbox/."
@@ -1069,7 +1077,8 @@ class Vault:
                 tmp = file_abs.with_name(f".{file_abs.name}.part")
                 tmp.write_bytes(content)
                 os.replace(tmp, file_abs)
-            elif keep_source:
+            elif keep_source or external:
+                # An import may cross file systems: copy first, remove the source at the end.
                 import shutil
                 tmp = file_abs.with_name(f".{file_abs.name}.part")
                 shutil.copyfile(src_abs, tmp)
@@ -1086,7 +1095,9 @@ class Vault:
                 raise ValueError("File changed while it was filed; try again.")
             sidecar = att.build_sidecar(
                 uid=uid, file_name=file_abs.name, ext=ext, original_name=original,
-                size=size, sha=sha, source=source or ("vault:" + src_norm if src_norm else ""),
+                size=size, sha=sha,
+                source=source
+                or ("vault:" + src_norm if src_norm else ("import:" + src_abs.name if external else "")),
                 related=related, description=description, actor=actor, created=created,
             )
             try:
@@ -1103,6 +1114,14 @@ class Vault:
             meta = att._sidecar_meta(note_abs) or {}
             info = att.summary(note_norm, meta)
             info.update({"duplicate": False, "source_moved_from": src_norm if moved else ""})
+            if external and not keep_source:
+                # The attachment is filed and logged. A source that cannot be removed
+                # (read-only folder) stays behind and is reported, it is not an error.
+                try:
+                    src_abs.unlink()
+                    info["source_moved_from"] = str(src_abs)
+                except OSError:
+                    info["source_kept"] = True
             return info
 
     def list_attachments(self, query: str = "", related: str = "", limit: int = 50) -> list[dict]:

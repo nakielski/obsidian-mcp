@@ -39,11 +39,11 @@ _MD_IMAGE = re.compile(r"!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^)\s]+))(?:\s+\"[^\"]*\"
 
 
 def max_bytes() -> int:
-    """Size limit for one image (OBSIDIAN_IMAGE_MAX_MB, default 4, at least 1)."""
+    """Size limit for one image (OBSIDIAN_IMAGE_MAX_MB, default 10, at least 1)."""
     try:
-        mb = int(os.environ.get("OBSIDIAN_IMAGE_MAX_MB", "4"))
+        mb = int(os.environ.get("OBSIDIAN_IMAGE_MAX_MB", "10"))
     except ValueError:
-        mb = 4
+        mb = 10
     return max(1, mb) * 1024 * 1024
 
 

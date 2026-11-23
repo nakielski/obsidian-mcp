@@ -198,7 +198,7 @@ class TestReadImage:
         with pytest.raises(ValueError, match="too large"):
             vault.read_image("Projekt/gross.png")
         monkeypatch.setenv("OBSIDIAN_IMAGE_MAX_MB", "kaputt")
-        assert images.max_bytes() == 4 * 1024 * 1024
+        assert images.max_bytes() == 10 * 1024 * 1024
 
     def test_restricted_folder_needs_the_flag(self, vault):
         with pytest.raises((McpError, ToolError), match="restricted"):
