@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Images in notes: `note_images` lists the images a note embeds (wikilink and
+  Markdown syntax), resolved like in Obsidian, and `read_image` returns one
+  image file as MCP image content. Read-only. PNG, JPEG, GIF and WebP only (no
+  SVG), content checked against the extension, size limit
+  `OBSIDIAN_IMAGE_MAX_MB` (default 4). Web links are never followed. Restricted
+  folders are refused unless `include_restricted=true`; `.obsidian` and the
+  other internal folders are never searched. `read_image` is the one tool
+  without an output schema: its answer is an image, not JSON.
 - Scope locks: `lock_scope`, `refresh_lock`, `release_lock` and `lock_status`.
   A lock covers a folder or a note (or `*` for the whole vault) and blocks only
   writes of other agents into that scope; it expires after `ttl_min` (default

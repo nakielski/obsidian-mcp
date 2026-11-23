@@ -608,7 +608,8 @@ class TestOutputSchemas:
     def test_all_tools_have_output_schema(self, server_vault):
         tools = _run_async(mcp.list_tools())
         assert len(tools) >= 18
-        missing = [t.name for t in tools if not t.outputSchema]
+        # read_image answers with image content, not JSON: no schema to declare.
+        missing = [t.name for t in tools if not t.outputSchema and t.name != "read_image"]
         assert missing == [], f"Tools missing outputSchema: {missing}"
 
     def test_read_note_output_schema_shape(self, server_vault):
