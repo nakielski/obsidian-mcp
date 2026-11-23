@@ -1145,6 +1145,118 @@ class Vault:
                 info["integrity"] = "ok" if ok else "mismatch"
         return info
 
+    # ---- images embedded in notes ------------------------------------
+
+    def _image_file(self, rel_path: str) -> tuple[Path, str, str]:
+        """Resolve a vault-relative image path: (absolute, normalized, mime).
+
+        The type is decided on the RESOLVED path, so a link named .png that
+        points at something else is refused.
+        """
+        from . import images as img
+
+        if img.image_mime(rel_path) is None:
+            raise ValueError(
+                f"Not a supported image: {rel_path}. Allowed: {', '.join(sorted(img.IMAGE_TYPES))}"
+            )
+        p, norm = self._resolve(rel_path)
+        mime = img.image_mime(p)
+        if mime is None:
+            raise ValueError(f"Not a supported image: {rel_path}")
+        if self._is_hidden_internal(p):
+            raise PermissionError(f"Access denied: internal folder ({rel_path})")
+        return p, norm, mime
+
+    def _images_by_name(self) -> dict[str, list[str]]:
+        """Every image file of the vault by casefolded file name (one walk)."""
+        from . import images as img
+
+        found: dict[str, list[str]] = defaultdict(list)
+        for dirpath, dirnames, filenames in os.walk(self.root):
+            here = Path(dirpath)
+            dirnames[:] = [d for d in dirnames if not self._is_hidden_internal(here / d)]
+            for name in filenames:
+                if img.image_mime(name) is None:
+                    continue
+                full = here / name
+                if self._is_hidden_internal(full):
+                    continue
+                found[name.casefold()].append(str(full.relative_to(self.root)).replace("\\", "/"))
+        return found
+
+    def note_images(self, rel_path: str, exclude_prefixes: tuple[str, ...] = ()) -> dict:
+        """Images a note embeds, resolved like Obsidian resolves them.
+
+        Order of resolution per link: relative to the note, from the vault
+        root, then by file name anywhere in the vault (shortest path wins).
+        Images inside ``exclude_prefixes`` are left out and only counted.
+        """
+        from . import images as img
+
+        note = self.read(rel_path)
+        targets, external = img.embedded_targets(note.content)
+        limit = img.max_bytes()
+        by_name: dict[str, list[str]] | None = None
+        out: list[dict] = []
+        hidden = 0
+        for target in targets[: img.MAX_EMBEDS]:
+            found: tuple[Path, str, str] | None = None
+            for cand in img.candidates(target, note.path):
+                try:
+                    p, norm, mime = self._image_file(cand)
+                except (PermissionError, ValueError):
+                    continue
+                if p.is_file():
+                    found = (p, norm, mime)
+                    break
+            if found is None and "/" not in target.strip("/"):
+                if by_name is None:
+                    by_name = self._images_by_name()
+                for cand in sorted(by_name.get(target.strip("/").casefold(), ()), key=lambda c: (len(c), c)):
+                    try:
+                        p, norm, mime = self._image_file(cand)
+                    except (PermissionError, ValueError):
+                        continue
+                    if p.is_file():
+                        found = (p, norm, mime)
+                        break
+            if found is None:
+                out.append({"link": target, "path": "", "mime": "", "size_bytes": 0, "readable": False,
+                            "reason": "not found"})
+                continue
+            p, norm, mime = found
+            if policies.is_restricted(norm, exclude_prefixes):
+                hidden += 1
+                continue
+            size = p.stat().st_size
+            reason = "" if size <= limit else f"larger than {limit // (1024 * 1024)} MB"
+            out.append({"link": target, "path": norm, "mime": mime, "size_bytes": size,
+                        "readable": not reason, "reason": reason})
+        return {
+            "note": note.path,
+            "images": out,
+            "external_skipped": external,
+            "restricted_hidden": hidden > 0,
+            "truncated": len(targets) > img.MAX_EMBEDS,
+        }
+
+    def read_image(self, rel_path: str) -> tuple[bytes, str, str]:
+        """One image file of the vault: (bytes, mime, normalized path)."""
+        from . import images as img
+
+        p, norm, mime = self._image_file(rel_path)
+        if not p.is_file():
+            raise FileNotFoundError(f"Image not found: {rel_path}")
+        limit = img.max_bytes()
+        size = p.stat().st_size
+        if size > limit:
+            raise ValueError(
+                f"Image too large: {size} bytes, limit {limit // (1024 * 1024)} MB (OBSIDIAN_IMAGE_MAX_MB)"
+            )
+        data = p.read_bytes()
+        img.check_content(data, mime)
+        return data, mime, norm
+
     def get_backlinks(self, target_title: str, exclude_prefixes: tuple[str, ...] = ()) -> list[Note]:
         """Find notes linking to target via [[wikilinks]], including embeds."""
         escaped = re.escape(target_title)

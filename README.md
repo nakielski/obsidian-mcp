@@ -138,6 +138,8 @@ The server runs on stdio. Register it with your client's standard MCP configurat
 | `attach_file(filename?, content_base64? \| source_path?, description?, name?, source?, related?, keep_source?)` | File an original document under `raw/assets/` with a companion note |
 | `list_attachments(query?, related?, limit?)` | List filed attachments, newest first |
 | `read_attachment_info(path, verify?)` | Metadata of one attachment, optional SHA-256 check |
+| `note_images(path, include_restricted?)` | List the images a note embeds, resolved like in Obsidian |
+| `read_image(path, include_restricted?)` | Return one image file (PNG, JPEG, GIF, WebP) as image content |
 | `search_query(query, limit?, include_restricted?)` | Ranked Lucene-style full-text query (fields, fuzzy, ranges) |
 | `rebuild_index()` | Rebuild the full-text index from all notes |
 | `index_status()` | Index health: docs indexed vs. vault notes |
@@ -157,6 +159,14 @@ such as `00 Inbox/scan.pdf` (up to `ATTACH_MAX_MB`, default 100; moved unless
 jpeg, gif, webp, svg, zip, 7z, tar.gz. The content must match the extension;
 executables, scripts, macro Office files and archives containing them are
 refused with `ATTACHMENT_TYPE`. File and companion note are raw/ and immutable.
+
+**Images in notes:** `note_images` lists what a note embeds (`![[plot.png]]`,
+`![alt](img/plot.png)`), resolved relative to the note, from the vault root, then
+by file name. `read_image` returns one of them as MCP image content, for clients
+that show pictures. Only PNG, JPEG, GIF and WebP, no SVG; the content must match
+the extension; files above `OBSIDIAN_IMAGE_MAX_MB` (default 4) are listed as not
+readable and refused. Web links in a note are never followed. Both tools are
+read-only and refuse restricted folders unless `include_restricted=true`.
 
 **Restricted folders (optional):** `OBSIDIAN_SEARCH_RESTRICTED="05 People,Private"`
 hides these folders from every search, listing and graph tool (and from
