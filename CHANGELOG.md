@@ -8,11 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `attach_file` imports from folders outside the vault: with
+  `ATTACH_IMPORT_DIRS` set, `source_path` may be an absolute path inside one
+  of the listed folders (entries may contain `*`). For files an agent produces
+  outside the vault, such as generated images in its cache. The file is copied
+  into `raw/assets/` and removed from the import folder afterwards (kept with
+  `keep_source`, or when the folder is read-only: then `source_kept` is true).
+  Paths outside the listed folders and symbolic links are refused with
+  `ATTACHMENT_IMPORT`. Unset: nothing changes.
 - Images in notes: `note_images` lists the images a note embeds (wikilink and
   Markdown syntax), resolved like in Obsidian, and `read_image` returns one
   image file as MCP image content. Read-only. PNG, JPEG, GIF and WebP only (no
   SVG), content checked against the extension, size limit
-  `OBSIDIAN_IMAGE_MAX_MB` (default 4). Web links are never followed. Restricted
+  `OBSIDIAN_IMAGE_MAX_MB` (default 10, raised from 4 so that every image that
+  can be attached inline can also be shown). Web links are never followed. Restricted
   folders are refused unless `include_restricted=true`; `.obsidian` and the
   other internal folders are never searched. `read_image` is the one tool
   without an output schema: its answer is an image, not JSON.

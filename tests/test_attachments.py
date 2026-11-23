@@ -262,3 +262,98 @@ class TestToolsOverMcp:
             asyncio.run(mcp.call_tool("attach_file", {"filename": "x.exe", "content_base64": "TVo="}))
         cause = exc.value if isinstance(exc.value, McpError) else exc.value.__cause__
         assert cause.error.message.startswith("Blocked by ATTACHMENT_TYPE")
+
+
+PNG_BILD = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+
+class TestImport:
+    """Files an agent produced outside the vault, e.g. generated images in its cache."""
+
+    @pytest.fixture
+    def cache(self, tmp_path_factory, monkeypatch):
+        wurzel = tmp_path_factory.mktemp("hermes")
+        for profil in ("content", "kino"):
+            (wurzel / "profiles" / profil / "cache" / "generated" / "images").mkdir(parents=True)
+        (wurzel / "profiles" / "content" / ".env").write_text("KEY=geheim", encoding="utf-8")
+        muster = str(wurzel / "profiles" / "*" / "cache" / "generated" / "images")
+        monkeypatch.setenv("ATTACH_IMPORT_DIRS", muster)
+        return wurzel / "profiles"
+
+    def test_import_files_and_removes_the_source(self, vault, cache):
+        bild = cache / "content" / "cache" / "generated" / "images" / "openrouter_gen_1.png"
+        bild.write_bytes(PNG_BILD)
+        info = vault.attach_file(
+            source_path=str(bild), name="Logo Sechseck", description="Testbild.",
+            source="Hermes, Profil content", today=DAY,
+        )
+        assert info["file"] == "raw/assets/2026/11/2026-11-04_logo-sechseck.png"
+        assert (vault.root / info["file"]).read_bytes() == PNG_BILD
+        assert not bild.exists() and info["source_moved_from"] == str(bild)
+        post = frontmatter.load(vault.root / info["note"])
+        assert post["original_name"] == "openrouter_gen_1.png" and post["mime"] == "image/png"
+        assert post["source"] == "Hermes, Profil content"
+        # Only vault paths are logged: the file and its companion note.
+        assert {e["path"] for e in _shard(vault.root)} == {info["file"], info["note"]}
+        # The filed image is served like any other image in the vault.
+        daten, mime, _ = vault.read_image(info["file"])
+        assert daten == PNG_BILD and mime == "image/png"
+
+    def test_keep_source_duplicate_and_default_origin(self, vault, cache):
+        bild = cache / "kino" / "cache" / "generated" / "images" / "kurve.png"
+        bild.write_bytes(PNG_BILD)
+        info = vault.attach_file(source_path=str(bild), keep_source=True, today=DAY)
+        assert bild.exists() and info["source_moved_from"] == ""
+        assert frontmatter.load(vault.root / info["note"])["source"] == "import:kurve.png"
+        again = vault.attach_file(source_path=str(bild), today=DAY)
+        assert again["duplicate"] is True and again["uid"] == info["uid"] and bild.exists()
+
+    def test_only_listed_folders_and_no_links(self, vault, cache, tmp_path_factory):
+        fremd = tmp_path_factory.mktemp("fremd") / "bild.png"
+        fremd.write_bytes(PNG_BILD)
+        daneben = cache / "content" / "cache" / "bild.png"
+        daneben.write_bytes(PNG_BILD)
+        bilder = cache / "content" / "cache" / "generated" / "images"
+        for pfad in (
+            fremd,
+            daneben,
+            cache / "content" / ".env",
+            bilder / ".." / ".." / ".." / ".env",
+            bilder,
+        ):
+            with pytest.raises(policies.PolicyViolationError) as fehler:
+                vault.attach_file(source_path=str(pfad), today=DAY)
+            assert fehler.value.policy == "ATTACHMENT_IMPORT"
+        with pytest.raises(FileNotFoundError):
+            vault.attach_file(source_path=str(bilder / "fehlt.png"), today=DAY)
+        # The usual checks still apply to an imported file.
+        (bilder / "skript.png").write_bytes(b"#!/bin/sh\nrm -rf /\n")
+        with pytest.raises(policies.PolicyViolationError) as fehler:
+            vault.attach_file(source_path=str(bilder / "skript.png"), today=DAY)
+        assert fehler.value.policy == "ATTACHMENT_TYPE"
+        assert fremd.exists() and daneben.exists() and (bilder / "skript.png").exists()
+        assert not (vault.root / "raw" / "assets").exists()
+
+    def test_symlink_is_refused(self, vault, cache, tmp_path_factory):
+        ziel = tmp_path_factory.mktemp("geheim") / "schluessel.png"
+        ziel.write_bytes(PNG_BILD)
+        bilder = cache / "content" / "cache" / "generated" / "images"
+        try:
+            (bilder / "link.png").symlink_to(ziel)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks not available")
+        with pytest.raises(policies.PolicyViolationError):
+            vault.attach_file(source_path=str(bilder / "link.png"), today=DAY)
+        assert ziel.exists()
+
+    def test_without_the_setting_nothing_is_imported(self, vault, tmp_path_factory, monkeypatch):
+        monkeypatch.delenv("ATTACH_IMPORT_DIRS", raising=False)
+        bild = tmp_path_factory.mktemp("cache") / "bild.png"
+        bild.write_bytes(PNG_BILD)
+        with pytest.raises(policies.PolicyViolationError, match="ATTACH_IMPORT_DIRS"):
+            vault.attach_file(source_path=str(bild), today=DAY)
+        # A relative entry in the setting does not count either.
+        monkeypatch.setenv("ATTACH_IMPORT_DIRS", "cache")
+        with pytest.raises(policies.PolicyViolationError):
+            vault.attach_file(source_path=str(bild), today=DAY)
+        assert bild.exists()

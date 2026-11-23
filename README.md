@@ -155,7 +155,13 @@ both.
 **Attachments:** `attach_file` takes `content_base64` (up to
 `ATTACH_MAX_INLINE_MB`, default 10) or `source_path`, a file already in the vault
 such as `00 Inbox/scan.pdf` (up to `ATTACH_MAX_MB`, default 100; moved unless
-`keep_source`). Allowed: pdf, docx, xlsx, pptx, csv, txt, md, msg, eml, png, jpg,
+`keep_source`). With `ATTACH_IMPORT_DIRS` set, `source_path` may also be an absolute
+path inside one of those folders, for files an agent produced outside the vault
+(generated images, for example). Entries are separated by the path separator of
+the system and may contain `*`, e.g. `/opt/data/profiles/*/cache/generated/images`.
+The file is copied into the vault and then removed from that folder unless
+`keep_source`. Anything outside the listed folders and every symbolic link is
+refused with `ATTACHMENT_IMPORT`. Unset: no import. Allowed: pdf, docx, xlsx, pptx, csv, txt, md, msg, eml, png, jpg,
 jpeg, gif, webp, svg, zip, 7z, tar.gz. The content must match the extension;
 executables, scripts, macro Office files and archives containing them are
 refused with `ATTACHMENT_TYPE`. File and companion note are raw/ and immutable.
@@ -164,7 +170,7 @@ refused with `ATTACHMENT_TYPE`. File and companion note are raw/ and immutable.
 `![alt](img/plot.png)`), resolved relative to the note, from the vault root, then
 by file name. `read_image` returns one of them as MCP image content, for clients
 that show pictures. Only PNG, JPEG, GIF and WebP, no SVG; the content must match
-the extension; files above `OBSIDIAN_IMAGE_MAX_MB` (default 4) are listed as not
+the extension; files above `OBSIDIAN_IMAGE_MAX_MB` (default 10, the same as an inline attachment) are listed as not
 readable and refused. Web links in a note are never followed. Both tools are
 read-only and refuse restricted folders unless `include_restricted=true`.
 

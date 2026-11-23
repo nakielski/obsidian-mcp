@@ -95,6 +95,64 @@ def max_inline_bytes() -> int:
     return min(_mb_env("ATTACH_MAX_INLINE_MB", 10) * 1024 * 1024, max_bytes())
 
 
+def import_dirs() -> list[Path]:
+    """Folders outside the vault that attach_file may take files from.
+
+    ``ATTACH_IMPORT_DIRS`` lists them, separated by ``os.pathsep``. An entry may
+    contain ``*`` (e.g. ``/opt/data/profiles/*/cache/generated/images``); it is
+    expanded on every call, so folders created later count as well. Unset or
+    empty: no import from outside the vault.
+    """
+    import glob
+
+    found: list[Path] = []
+    for entry in os.environ.get("ATTACH_IMPORT_DIRS", "").split(os.pathsep):
+        entry = entry.strip()
+        if not entry or not os.path.isabs(entry):
+            continue
+        for hit in glob.glob(entry):
+            real = Path(os.path.realpath(hit))
+            if real.is_dir() and real not in found:
+                found.append(real)
+    return found
+
+
+def is_import_path(source_path: str) -> bool:
+    """True for an absolute path: a file outside the vault, not a vault-relative one."""
+    text = (source_path or "").strip()
+    return os.path.isabs(text) or bool(re.match(r"^[A-Za-z]:[\\/]", text))
+
+
+def resolve_import(source_path: str) -> Path:
+    """Resolve an absolute source path to a file inside one of the import folders.
+
+    Refused: anything outside the configured folders, symbolic links (the file
+    itself or a folder on the way that leads out), and non-files.
+    """
+    text = (source_path or "").strip()
+    dirs = import_dirs()
+    if not dirs:
+        raise policies.PolicyViolationError(
+            "Files outside the vault are not accepted here (ATTACH_IMPORT_DIRS is not set). "
+            "Use a vault-relative source_path or content_base64.",
+            policy="ATTACHMENT_IMPORT",
+        )
+    path = Path(text)
+    if path.is_symlink():
+        raise policies.PolicyViolationError(
+            "source_path is a symbolic link.", policy="ATTACHMENT_IMPORT"
+        )
+    real = Path(os.path.realpath(path))
+    if not any(real != base and base in real.parents for base in dirs):
+        raise policies.PolicyViolationError(
+            "source_path is outside the folders attach_file may import from.",
+            policy="ATTACHMENT_IMPORT",
+        )
+    if not real.is_file():
+        raise FileNotFoundError(f"Source file not found: {source_path}")
+    return real
+
+
 def split_extension(filename: str) -> tuple[str, str]:
     """Return (stem, lowercase extension); '.tar.gz' counts as one extension."""
     name = Path(filename.replace("\\", "/")).name
