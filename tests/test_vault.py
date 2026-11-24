@@ -1,5 +1,6 @@
 """Tests for the Vault filesystem layer and MCP server tools."""
 import asyncio
+import datetime
 import json
 import pathlib
 import sys
@@ -950,3 +951,43 @@ class TestServerManageFrontmatterMany:
         with pytest.raises(Exception, match="RAW_IMMUTABLE"):
             _run_async(mcp.call_tool("manage_frontmatter", {
                 "path": "raw/q.md", "action": "set", "values": {"uid": "raw-x"}}))
+
+
+class TestWikiLogHeader:
+    """A new monthly wiki log gets its frontmatter from the server."""
+
+    def test_first_append_of_the_month_gets_header(self, vault, tmp_path):
+        note, created = vault.append("wiki/log/2026-12.md", "\n## 2026-12-01: Erster (ultron)\n")
+        assert created
+        assert note.metadata["uid"] == "note-202612-wikilog"
+        assert note.metadata["title"] == "Wiki-Log Dezember 2026"
+        assert note.metadata["type"] == "note"
+        assert note.metadata["status"] == "active"
+        assert note.metadata["tags"] == ["log"]
+        today = datetime.date.today().isoformat()
+        assert str(note.metadata["created"]) == today
+        assert str(note.metadata["updated"]) == today
+        text = (tmp_path / "wiki/log/2026-12.md").read_text(encoding="utf-8")
+        assert text.startswith("---\n")
+        assert "# Wiki-Log 2026-12\n\n## 2026-12-01: Erster (ultron)" in text
+
+    def test_second_append_keeps_header_and_first_entry(self, vault, tmp_path):
+        vault.append("wiki/log/2026-12.md", "## 2026-12-01: Erster (ultron)")
+        note, created = vault.append("wiki/log/2026-12.md", "## 2026-12-01: Zweiter (claude)")
+        assert not created
+        assert note.metadata["uid"] == "note-202612-wikilog"
+        text = (tmp_path / "wiki/log/2026-12.md").read_text(encoding="utf-8")
+        assert text.count("# Wiki-Log 2026-12") == 1
+        assert text.index("Erster") < text.index("Zweiter")
+
+    def test_own_frontmatter_wins(self, vault):
+        note, _ = vault.append(
+            "wiki/log/2027-01.md", "---\ntitle: Eigener Kopf\n---\n\n# Eigenes\n"
+        )
+        assert note.metadata == {"title": "Eigener Kopf"}
+
+    def test_other_paths_stay_plain(self, vault, tmp_path):
+        vault.append("wiki/log/notizen.md", "frei")
+        vault.append("03 Notes/2026-12.md", "frei")
+        assert (tmp_path / "wiki/log/notizen.md").read_text(encoding="utf-8") == "frei"
+        assert (tmp_path / "03 Notes/2026-12.md").read_text(encoding="utf-8") == "frei"
