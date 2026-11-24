@@ -45,6 +45,41 @@ def _dumps(post) -> str:
         return post.content
     return frontmatter.dumps(post)
 
+_WIKI_LOG_RE = re.compile(r"^wiki/log/(\d{4})-(0[1-9]|1[0-2])\.md$")
+_MONATE = (
+    "Januar", "Februar", "März", "April", "Mai", "Juni",
+    "Juli", "August", "September", "Oktober", "November", "Dezember",
+)
+
+
+def _wiki_log_header(rel_path: str, post: frontmatter.Post) -> None:
+    """Give a new monthly wiki log its frontmatter and heading.
+
+    The monthly file wiki/log/YYYY-MM.md comes into being with the first
+    append of the month, whoever writes first. Without this the file started
+    with a bare log entry and no frontmatter. Content that brings its own
+    frontmatter is left alone; other paths are not touched.
+    """
+    m = _WIKI_LOG_RE.match(rel_path.replace("\\", "/"))
+    if m is None or post.metadata:
+        return
+    year, month = m.group(1), m.group(2)
+    today = datetime.date.today().isoformat()
+    post.metadata = {
+        "created": today,
+        "status": "active",
+        "tags": ["log"],
+        "title": f"Wiki-Log {_MONATE[int(month) - 1]} {year}",
+        "type": "note",
+        "uid": f"note-{year}{month}-wikilog",
+        "updated": today,
+    }
+    heading = f"# Wiki-Log {year}-{month}"
+    body = (post.content or "").lstrip("\n")
+    if not body.startswith(heading):
+        post.content = f"{heading}\n\n{body}" if body else heading
+
+
 def _require_wiki_uid(rel_path: str, metadata: dict) -> None:
     """Reject wiki note creation without a non-empty uid field.
 
@@ -598,6 +633,7 @@ class Vault:
                     post = frontmatter.loads(content)
                 else:
                     post = frontmatter.Post(content)
+                _wiki_log_header(norm, post)
                 _require_wiki_uid(norm, dict(post.metadata))
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(_dumps(post), encoding="utf-8")

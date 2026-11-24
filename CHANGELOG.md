@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Monthly wiki log: when an append creates `wiki/log/YYYY-MM.md` and the
+  content brings no frontmatter, the server writes the header itself
+  (`uid: note-YYYYMM-wikilog`, title, type, status, tags, created, updated)
+  and the heading `# Wiki-Log YYYY-MM`. Until now the first writer of a month
+  left a file without frontmatter. Other paths and content with its own
+  frontmatter are unchanged.
 - `attach_file` imports from folders outside the vault: with
   `ATTACH_IMPORT_DIRS` set, `source_path` may be an absolute path inside one
   of the listed folders (entries may contain `*`). For files an agent produces
