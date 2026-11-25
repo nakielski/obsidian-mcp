@@ -55,7 +55,8 @@ Environment:
 | `OBSIDIAN_EMBED_BATCH` | `8` | Chunks per embedding request; a request that times out is split in halves and retried |
 | `OBSIDIAN_EMBED_TIMEOUT` / `OBSIDIAN_QDRANT_TIMEOUT` | `20` / `10` s | Request timeouts (per request, so per batch) |
 | `OBSIDIAN_SEMANTIC_BACKOFF` | `60` s | Pause after a backend error before the next write tries again |
-| `OBSIDIAN_SEMANTIC_INLINE_MAX` | `32` | A write needing more new chunk embeddings than this is queued for `semantic_sync` instead of blocking the tool call |
+| `OBSIDIAN_SEMANTIC_INLINE_MAX` | `32` | A write needing more new chunk embeddings than this is queued for `semantic_sync` instead of being embedded right after the write |
+| `OBSIDIAN_SEMANTIC_BACKGROUND` | `1` | Writes return at once and the vectors follow in a background thread. `0` updates the vectors inside the write call, as before |
 
 Folder values are case-insensitive and match whole folders: `05 People`
 covers `05 People/…` but not `05 Peoplex/…`.
@@ -92,6 +93,15 @@ index created before this version is rebuilt once on the first sync.
   An edit embeds only the changed sections and deletes vanished ones (after
   the upsert, so a note is never without vectors). Tag or frontmatter changes
   only relabel the payload. `archive_note` reuses the stored vectors.
+- **Writes do not wait for the embedding**: a write records the note in
+  `semantic-pending.json` and hands the update to one background thread, in
+  the order of the writes. The tool call returns at once, also when the
+  embedding server first has to load its model (Ollama unloads it after a
+  pause, the first embedding after that can take longer than a caller's
+  timeout). Usually the vectors are current a moment later; full text search
+  is current immediately. If the server process ends first, the entry stays
+  pending and the next `semantic_sync` catches it up. A running sync and the
+  background thread never write at the same time.
 - **Failures never break writes**: if Ollama or Qdrant is down the write
   completes, the note is recorded in `semantic-pending.json` (next to the
   Whoosh index, machine-local) and the next `semantic_sync` catches it up.

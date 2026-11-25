@@ -787,7 +787,8 @@ class Vault:
                 result["indexed"] = False
         sx = self._init_semantic()
         if sx is not None:
-            result["semantic"] = sx.on_write(rel_path, action, note)
+            # does not wait for the embedding: "queued", the vectors follow in the background
+            result["semantic"] = sx.submit(rel_path, action, note)
         if note is not None and layer == "wiki":
             meta = note.metadata if hasattr(note, "metadata") else {}
             result["index"] = policies.update_wiki_index(

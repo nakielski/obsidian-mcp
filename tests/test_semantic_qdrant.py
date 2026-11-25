@@ -53,6 +53,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("OBSIDIAN_SEMANTIC", "1")
     monkeypatch.setenv("OBSIDIAN_SEARCH_RESTRICTED", "05 People")
     monkeypatch.setenv("OBSIDIAN_SEMANTIC_EXCLUDE", "Private")
+    # These tests check the index itself, so the update runs inside the write.
+    # The background path has its own tests in test_semantic_background.py.
+    monkeypatch.setenv("OBSIDIAN_SEMANTIC_BACKGROUND", "0")
     vault = Vault(tmp_path)
     emb = FakeEmbedder()
     sx = SemanticIndex(vault.root, SemanticConfig.from_env(), client=QdrantClient(location=":memory:"),

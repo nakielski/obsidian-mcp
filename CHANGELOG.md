@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Semantic index: a write no longer waits for the embedding. The write hook
+  records the note as pending and one background thread updates the vectors
+  in the order of the writes. Until now every write embedded the changed
+  sections inside the tool call and waited up to `OBSIDIAN_EMBED_TIMEOUT`
+  (20 s) for it. After a pause Ollama has to load its model first, so the
+  first write ran callers with a shorter timeout into an error although the
+  note was written (seen 2026-11-24/25: a client waiting 8 s reported a
+  failed write three times for a note that existed). Measured against an
+  embedding server that answers after 12 s: write 12.1 s before, 0.05 s now.
+  If the process ends before the thread is done the note stays pending and
+  `semantic_sync` catches it up. The write result reports `queued`.
+  `OBSIDIAN_SEMANTIC_BACKGROUND=0` restores the old behaviour.
+
 ### Added
 - Monthly wiki log: when an append creates `wiki/log/YYYY-MM.md` and the
   content brings no frontmatter, the server writes the header itself
