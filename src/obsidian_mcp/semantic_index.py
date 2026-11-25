@@ -9,8 +9,15 @@ Design:
 
 - **Same choke point as the Whoosh index.** Every write that goes through the
   Vault (create/update/append/patch/frontmatter/tags/replace/delete/archive)
-  updates the vectors of that note in the same call. Out-of-band changes are
-  caught up by ``sync`` (tool ``semantic_sync`` or CLI ``obsidian-mcp-semantic``).
+  updates the vectors of that note. Out-of-band changes are caught up by
+  ``sync`` (tool ``semantic_sync`` or CLI ``obsidian-mcp-semantic``).
+- **Writes do not wait for the embedding.** The write hook only records the
+  note as pending and hands the update to one background thread; the tool
+  call returns at once. An embedding server that has to load its model first
+  (Ollama unloads it after a pause) therefore no longer delays the write or
+  runs its caller into a timeout. If the process ends before the thread is
+  done, the pending entry remains and the next ``sync`` catches it up.
+  ``OBSIDIAN_SEMANTIC_BACKGROUND=0`` restores the update inside the call.
 - **Content-addressed chunks.** A note is split at its H1-H3 headings (fence
   aware); each chunk's point id is ``uuid5(path + hash(embedded text))``. An
   edit re-embeds only the chunks whose text changed, removes vanished chunks
@@ -33,6 +40,7 @@ Embeddings come from Ollama (``/api/embed``) or any OpenAI-compatible endpoint
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import hashlib
 import ipaddress
@@ -41,6 +49,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 import warnings
@@ -118,6 +127,7 @@ class SemanticConfig:
     backoff_seconds: float = 60.0
     min_score: float = 0.0
     inline_max_chunks: int = 32
+    background: bool = True
 
     @classmethod
     def from_env(cls) -> SemanticConfig:
@@ -153,6 +163,7 @@ class SemanticConfig:
             backoff_seconds=float(env("OBSIDIAN_SEMANTIC_BACKOFF", "60")),
             min_score=float(env("OBSIDIAN_SEMANTIC_MIN_SCORE", "0")),
             inline_max_chunks=max(1, int(env("OBSIDIAN_SEMANTIC_INLINE_MAX", "32"))),
+            background=env("OBSIDIAN_SEMANTIC_BACKGROUND", "1").strip().lower() not in {"0", "false", "no", "off"},
         )
 
 
@@ -446,6 +457,14 @@ class SemanticIndex:
         self._collection_ready = False
         self._down_until = 0.0
         self.last_error = ""
+        # Background updates: one worker thread, jobs in write order.
+        self._jobs: list[tuple[str, str, object]] = []
+        self._jobs_lock = threading.Lock()
+        self._write_lock = threading.RLock()  # worker and sync never write at the same time
+        self._worker: threading.Thread | None = None
+        self._idle = threading.Event()
+        self._idle.set()
+        self._atexit = False
 
     # -- helpers ------------------------------------------------------------
 
@@ -644,6 +663,7 @@ class SemanticIndex:
                 return "indexed"
             if self.excluded(rel_path):
                 self.remove_note(rel_path)
+                self.pending.discard(rel_path)
                 return "skipped"
             if self.index_note(note, max_new=self.cfg.inline_max_chunks).get("deferred"):
                 # very long new note: embedding it now would stall the tool call
@@ -657,6 +677,49 @@ class SemanticIndex:
             with contextlib.suppress(OSError):
                 self.pending.add(rel_path if note is None else note.path)
             return "pending"
+
+    # -- background updates -------------------------------------------------
+
+    def submit(self, rel_path: str, action: str, note) -> str:
+        """Vault write hook that does not wait. Never raises. Returns 'queued'.
+
+        The note is recorded as pending first, so an update that the worker
+        never finishes (process ended, backend down) is caught up by ``sync``.
+        The worker runs ``on_write`` for each job in the order of the writes;
+        ``on_write`` clears the pending entry once the vectors are current.
+        Without ``cfg.background`` this is ``on_write``.
+        """
+        if not self.cfg.background:
+            return self.on_write(rel_path, action, note)
+        with contextlib.suppress(Exception):
+            self.pending.add(rel_path if note is None else note.path)
+        with self._jobs_lock:
+            self._jobs.append((rel_path, action, note))
+            self._idle.clear()
+            if self._worker is None:
+                if not self._atexit:
+                    # give a running update a moment at exit; what is left stays pending
+                    atexit.register(self.drain, 5.0)
+                    self._atexit = True
+                self._worker = threading.Thread(target=self._work, name="obsidian-mcp-semantic",
+                                                daemon=True)
+                self._worker.start()
+        return "queued"
+
+    def _work(self) -> None:
+        while True:
+            with self._jobs_lock:
+                if not self._jobs:
+                    self._worker = None
+                    self._idle.set()
+                    return
+                job = self._jobs.pop(0)
+            with self._write_lock:
+                self.on_write(*job)  # never raises
+
+    def drain(self, timeout: float | None = None) -> bool:
+        """Wait until the background worker has nothing left. False on timeout."""
+        return self._idle.wait(timeout)
 
     # -- read path ------------------------------------------------------------
 
@@ -728,6 +791,10 @@ class SemanticIndex:
         reports ``remaining``; calling again continues cheaply because
         unchanged notes need no embedding.
         """
+        with self._write_lock:  # not while the background worker updates a note
+            return self._sync(notes, max_seconds, progress)
+
+    def _sync(self, notes, max_seconds: float | None, progress) -> dict:
         start = time.monotonic()
         existing_all = self._scan()
         notes = list(notes)
