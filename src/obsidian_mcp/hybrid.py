@@ -8,6 +8,15 @@ from __future__ import annotations
 
 import re
 
+from .search_index import (
+    SORTS,
+    hidden_statuses,
+    hide_conflicts,
+    is_conflict_copy,
+    is_hidden,
+    parse_since,
+)
+
 RRF_K = 60
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
@@ -21,6 +30,10 @@ _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _VERSION_RE = re.compile(r"\bv\d+(?:\.\d+)*\b")
 _NOISE_RE = re.compile(r"\b(?:final|kopie|copy)\b")
 _SPLIT_RE = re.compile(r"[\W_]+")
+# Copies made by sync tools: 'Note (# Name clash 2026-11-03 mz12c7C #).md',
+# 'Note.sync-conflict-20260909-224424-5IMFKZP.md'
+_CLASH_RE = re.compile(r"\(#\s*name clash[^)]*#\)")
+_CONFLICT_RE = re.compile(r"\.sync-conflict-[0-9a-z-]+")
 
 
 def variant_key(path: str) -> str:
@@ -29,13 +42,15 @@ def variant_key(path: str) -> str:
     'MCP Artikel 2 Entwurf v0.6 2026-10-19.md' in a project folder and
     '06 Archive/MCP Artikel 2 Entwurf v0.3 (2026-10-18).md' share the key
     'mcp artikel 2 entwurf': folder, dates, version numbers and brackets are
-    ignored. Generic file names (index.md, SKILL.md, a bare date) keep their
-    path as key, so unrelated notes are never merged.
+    ignored, and so are the suffixes of sync copies ('(# Name clash ... #)',
+    '.sync-conflict-...'). Generic file names (index.md, SKILL.md, a bare
+    date) keep their path as key, so unrelated notes are never merged.
     """
     stem = path.rsplit("/", 1)[-1]
     if stem.lower().endswith(".md"):
         stem = stem[:-3]
-    s = _NOISE_RE.sub(" ", _VERSION_RE.sub(" ", _DATE_RE.sub(" ", stem.lower())))
+    stem = _CONFLICT_RE.sub(" ", _CLASH_RE.sub(" ", stem.lower()))
+    s = _NOISE_RE.sub(" ", _VERSION_RE.sub(" ", _DATE_RE.sub(" ", stem)))
     words = [w for w in _SPLIT_RE.split(s) if w]
     if len(words) < 2 or len("".join(words)) < 8:
         return path
@@ -89,7 +104,8 @@ def path_matcher(patterns) -> re.Pattern | None:
 def rrf_fuse(fulltext: list[dict], semantic: list[dict], limit: int, k: int = RRF_K,
              reserve: int = RESERVE, secondary: tuple[str, ...] = SECONDARY_DEFAULT, *,
              all_terms: list[dict] | None = None, all_terms_weight: float = ALL_TERMS_WEIGHT,
-             demote: tuple[str, ...] = (), demote_weight: float = DEMOTE_WEIGHT) -> list[dict]:
+             demote: tuple[str, ...] = (), demote_weight: float = DEMOTE_WEIGHT,
+             replaced: tuple[str, ...] = ("superseded",)) -> list[dict]:
     """Merge ranked hit lists: Reciprocal Rank Fusion plus four corrections.
 
     1. RRF: score = sum of 1 / (k + rank) per retriever, rank 1-based. Needs no
@@ -109,8 +125,10 @@ def rrf_fuse(fulltext: list[dict], semantic: list[dict], limit: int, k: int = RR
     4. Variants: versions and copies of one note (see ``variant_key``) count as
        one hit. The newest live copy represents the group (highest version,
        then date in the file name; a copy outside the ``secondary`` folders
-       such as the archive wins if there is one); the others are listed in
-       ``variants``. Otherwise five drafts of one text fill five of ten slots.
+       such as the archive wins if there is one, and so does a copy that is
+       neither a sync conflict copy nor carries a ``replaced`` status); the
+       others are listed in ``variants``. Otherwise five drafts of one text
+       fill five of ten slots.
     5. Reserve: the ``reserve`` best groups of each retriever are always in the
        result (full text: notes with all words first). With k=60 any note found
        by both lists (even at rank 30 of a loose OR full-text query) beats the
@@ -135,6 +153,8 @@ def rrf_fuse(fulltext: list[dict], semantic: list[dict], limit: int, k: int = RR
                 "uid": hit.get("uid", ""), "tags": list(hit.get("tags") or []),
                 "score": 0.0, "sources": [], "fulltext_rank": None, "semantic_rank": None,
                 "all_terms_rank": None, "variants": [], "demoted": is_demoted(hit["path"]),
+                "status": hit.get("status", ""), "typ": hit.get("typ", ""),
+                "date": hit.get("date", ""), "date_source": hit.get("date_source", ""),
             })
             if entry[f"{source}_rank"] is not None:  # duplicate path within one list
                 continue
@@ -147,7 +167,7 @@ def rrf_fuse(fulltext: list[dict], semantic: list[dict], limit: int, k: int = RR
             if source == "semantic":
                 entry["heading"] = hit.get("heading", "")
                 entry["text"] = hit.get("text", "")
-            for key in ("title", "uid"):
+            for key in ("title", "uid", "status", "typ", "date", "date_source"):
                 if not entry[key] and hit.get(key):
                     entry[key] = hit[key]
     for e in merged.values():  # stable output order of sources
@@ -170,8 +190,10 @@ def rrf_fuse(fulltext: list[dict], semantic: list[dict], limit: int, k: int = RR
     best_rank: dict[int, dict[str, int]] = {}
     for members in groups.values():
         live = [m for m in members if not _is_secondary(m["path"], secondary)] or members
-        # newest version (then date) represents the group; score breaks ties
-        rep = dict(max(live, key=lambda m: (_recency(m["path"]), m["score"])))
+        # a valid copy first, then the newest version (then date); score breaks ties
+        rep = dict(max(live, key=lambda m: (
+            not is_conflict_copy(m["path"]) and str(m["status"]).lower() not in replaced,
+            _recency(m["path"]), m["score"])))
         rep["score"] = members[0]["score"]  # best member decides the rank; copies add nothing
         rep["variants"] = [m["path"] for m in members if m["path"] != rep["path"]]
         reps.append(rep)
@@ -212,13 +234,18 @@ def make_snippet(text: str, max_chars: int = 280) -> str:
 
 def collect(vault, query: str, limit: int = 10, folder: str = "",
             include_restricted: bool = False, cfg=None, candidates: int | None = None,
-            all_terms: bool | None = None) -> dict:
+            all_terms: bool | None = None, since: str = "",
+            include_superseded: bool = False) -> dict:
     """Run the retrievers with the same folder policy; return the raw ranked lists.
 
     {"fulltext": OR full text, "all_terms": AND full text (queries of two or
     more words, only if cfg.all_terms_weight > 0 or ``all_terms`` is True),
-    "semantic": vectors, "ft_ok", "sem_ok", "warnings"}.
+    "semantic": vectors, "ft_ok", "sem_ok", "warnings", "hidden"}.
     ``candidates`` overrides the list length (the eval dump fetches more).
+    Every hit carries status, typ, date and date_source from the full-text
+    index. Replaced notes and sync conflict copies are dropped unless
+    ``include_superseded`` (``hidden`` counts them), and so are notes dated
+    before ``since`` (YYYY-MM-DD).
     """
     from .semantic_index import INSTALL_HINT, QDRANT_AVAILABLE, SemanticConfig, normalize_prefix
 
@@ -226,8 +253,9 @@ def collect(vault, query: str, limit: int = 10, folder: str = "",
     restricted = () if include_restricted else cfg.restricted
     folder_prefix = normalize_prefix(folder)
     n = candidates or candidate_count(limit, cfg)
+    since_iso = parse_since(since)
     out = {"fulltext": [], "all_terms": [], "semantic": [], "ft_ok": False, "sem_ok": False,
-           "warnings": []}
+           "warnings": [], "hidden": 0}
     warnings = out["warnings"]
 
     ix = vault._init_index()
@@ -263,7 +291,43 @@ def collect(vault, query: str, limit: int = 10, folder: str = "",
         except Exception as e:
             sx._mark_down(e)
             warnings.append(f"semantic search failed: {type(e).__name__}: {e}")
+    out["hidden"] = _screen(ix, out, since_iso.date().isoformat() if since_iso else "",
+                            include_superseded)
     return out
+
+
+def _screen(ix, lists: dict, since: str, include_superseded: bool) -> int:
+    """Give every hit the index fields and drop what the caller did not ask for.
+
+    Semantic hits know only path and text; status and date come from the
+    full-text index. Returns the number of distinct notes dropped as replaced
+    or as conflict copies.
+    """
+    keys = ("fulltext", "all_terms", "semantic")
+    meta: dict = {}
+    if ix is not None:
+        try:
+            meta = ix.meta(h["path"] for key in keys for h in lists[key])
+        except Exception:
+            meta = {}
+    statuses = () if include_superseded else hidden_statuses()
+    conflicts = False if include_superseded else hide_conflicts()
+    hidden: set[str] = set()
+    for key in keys:
+        kept = []
+        for hit in lists[key]:
+            known = meta.get(hit["path"], {})
+            for field in ("status", "typ", "date", "date_source"):
+                if not hit.get(field) and known.get(field):
+                    hit[field] = known[field]
+            if since and str(hit.get("date") or "") < since:
+                continue
+            if is_hidden(hit["path"], hit.get("status", ""), statuses, conflicts):
+                hidden.add(hit["path"])
+                continue
+            kept.append(hit)
+        lists[key] = kept
+    return len(hidden)
 
 
 def candidate_count(limit: int, cfg) -> int:
@@ -277,25 +341,40 @@ def fuse(lists: dict, limit: int, cfg, candidates: int | None = None) -> list[di
     return rrf_fuse(lists.get("fulltext", [])[:n], lists.get("semantic", [])[:n], limit,
                     secondary=cfg.secondary, all_terms=lists.get("all_terms", [])[:n],
                     all_terms_weight=cfg.all_terms_weight,
-                    demote=cfg.demote, demote_weight=cfg.demote_weight)
+                    demote=cfg.demote, demote_weight=cfg.demote_weight,
+                    replaced=hidden_statuses())
 
 
 def hybrid_query(vault, query: str, limit: int = 10, folder: str = "",
-                 include_restricted: bool = False) -> dict:
-    """Run both retrievers with the same folder policy and fuse the results."""
+                 include_restricted: bool = False, sort: str = "relevance",
+                 since: str = "", include_superseded: bool = False) -> dict:
+    """Run both retrievers with the same folder policy and fuse the results.
+
+    sort='newest': the best matches (the candidate pool of both retrievers,
+    fused) ordered by note date, newest first. Relevance still decides which
+    notes are in the pool; notes without a date come last.
+    """
     from .semantic_index import SemanticConfig
 
     if limit <= 0:
         raise ValueError("limit must be positive")
+    if sort not in SORTS:
+        raise ValueError(f"sort must be one of {', '.join(SORTS)}, got {sort!r}")
     limit = min(limit, 50)
     cfg = SemanticConfig.from_env()
     restricted = () if include_restricted else cfg.restricted
-    lists = collect(vault, query, limit, folder, include_restricted, cfg)
+    lists = collect(vault, query, limit, folder, include_restricted, cfg, since=since,
+                    include_superseded=include_superseded)
     ft_ok, sem_ok, warnings = lists["ft_ok"], lists["sem_ok"], lists["warnings"]
     if not ft_ok and not sem_ok:
         raise RuntimeError("No search backend available: " + "; ".join(warnings))
 
-    results = fuse(lists, limit, cfg)
+    if sort == "newest":
+        pool = fuse(lists, candidate_count(limit, cfg), cfg)
+        pool.sort(key=lambda r: r.get("date") or "", reverse=True)  # stable: relevance breaks ties
+        results = pool[:limit]
+    else:
+        results = fuse(lists, limit, cfg)
     for r in results:
         snippet = r.pop("text", "")
         if not snippet:
@@ -311,6 +390,8 @@ def hybrid_query(vault, query: str, limit: int = 10, folder: str = "",
         "mode": mode,
         "warning": "; ".join(warnings),
         "restricted_hidden": bool(restricted),
+        "sort": sort,
+        "superseded_hidden": lists["hidden"],
         "total": len(results),
         "results": results,
     }

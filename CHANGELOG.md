@@ -59,7 +59,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Type allow-list with content check; executables are always refused, also
   inside zip/tar archives. File and note are logged like any other write.
 
+- `search_query` and `hybrid_search`: every hit carries `date` (YYYY-MM-DD)
+  and `date_source` (`frontmatter`, `filename`, `file`, `none`);
+  `hybrid_search` hits also carry `status` and `typ`. New parameters on both
+  tools: `sort` (`relevance` or `newest`), `since` (YYYY-MM-DD) and
+  `include_superseded`. With `sort=newest`, `hybrid_search` orders its
+  candidate pool by date, so relevance still decides which notes are
+  considered.
+
+### Changed
+- `search_query` and `hybrid_search` leave out replaced notes (status
+  `superseded`) and Syncthing conflict copies (`.sync-conflict-…`) unless
+  `include_superseded` is set; `superseded_hidden` in the result counts them.
+  `OBSIDIAN_SEARCH_HIDE_STATUS` (comma separated, default `superseded`, empty
+  hides none) and `OBSIDIAN_SEARCH_HIDE_CONFLICTS=0` change this. Seen
+  2026-11-26: a search for a project returned a superseded copy on rank 2
+  while the valid copy of the same note was not in the result.
+- Copies with a `(# Name clash … #)` or `.sync-conflict-…` suffix count as
+  variants of one note. Of several variants a copy that is neither replaced
+  nor a conflict copy represents the group.
+
 ### Fixed
+- Date of a note in the full-text index (`mtime:[…]` ranges): a frontmatter
+  date written without quotes (`updated: 2026-11-03`, which YAML reads as a
+  date object) was ignored and the time of indexing stored instead, and so
+  was every note without a date. Nearly all notes therefore counted as
+  changed today and a date range could not tell old from new. The date now
+  comes from the frontmatter (`updated`, `datum`, `date`, `created`), else
+  from the newest date in the file name (`2026-11-03` or `03.11.2026`), else
+  from the file's modification time, never from the clock. The index is
+  rebuilt once on the next start.
 - Notes without frontmatter stay without it: append, patch and the other
   edits wrote an empty `---\n{}\n---` block in front of the body.
 
