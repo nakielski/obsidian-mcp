@@ -106,6 +106,18 @@ def _since_field():
     )
 
 
+def _scope_field():
+    return Field(
+        default="all",
+        description=(
+            "'all' (default): every note that matches, also notes that only mention the "
+            "topic in their text. 'topic': only notes that are about it - every query word "
+            "is in the note's path, title or tags. Use 'topic' when the user asks for the "
+            "notes on a subject and passing mentions would be noise."
+        ),
+    )
+
+
 def _include_superseded_field():
     return Field(
         default=False,
@@ -334,7 +346,9 @@ class SearchQueryOutput(BaseModel):
     query: str
     corrected: str
     sort: str = "relevance"
+    scope: str = "all"
     superseded_hidden: int = 0
+    mentions_hidden: int = 0
     total: int
     results: list[SearchQueryItem]
     restricted_hidden: bool = False
@@ -1498,6 +1512,7 @@ def search_query(
     sort: str = _sort_field(),
     since: str = _since_field(),
     include_superseded: bool = _include_superseded_field(),
+    scope: str = _scope_field(),
 ) -> SearchQueryOutput:
     """Run a ranked, tokenized full-text query against the vault index.
 
@@ -1515,6 +1530,8 @@ def search_query(
     (frontmatter | filename | file | none). Trust 'file' least.
     "superseded_hidden" counts matching notes left out because they are
     replaced (status superseded) or sync conflict copies.
+    "mentions_hidden" counts notes scope='topic' left out because they only
+    mention the query words in their text.
 
     Side effects: none (read-only). Requires VAULT_INDEX enabled (default).
     """
@@ -1527,12 +1544,15 @@ def search_query(
                 "Use search_notes for plain substring search."
             )
         hidden = _hidden(include_restricted)
+        if scope not in search_index.SCOPES:
+            raise ValueError(f"scope must be one of {', '.join(search_index.SCOPES)}, got {scope!r}")
         stats: dict = {}
         results = ix.search(
             query, limit=limit, exclude_prefixes=hidden, sort=sort,
             since=search_index.parse_since(since),
             hide_status=() if include_superseded else search_index.hidden_statuses(),
             hide_conflict_copies=not include_superseded and search_index.hide_conflicts(),
+            topic=search_index.topic_terms(query) if scope == "topic" else (),
             stats=stats,
         )
         corrected = ix.corrected(query)
@@ -1540,7 +1560,9 @@ def search_query(
             "query": query,
             "corrected": corrected,
             "sort": sort,
+            "scope": scope,
             "superseded_hidden": stats.get("hidden", 0),
+            "mentions_hidden": len(stats.get("mentions", [])),
             "total": len(results),
             "results": results,
             "restricted_hidden": bool(hidden),
@@ -1641,7 +1663,9 @@ class HybridSearchOutput(BaseModel):
     warning: str
     restricted_hidden: bool
     sort: str = "relevance"
+    scope: str = "all"
     superseded_hidden: int = 0
+    mentions_hidden: int = 0
     total: int
     results: list[HybridSearchItem]
 
@@ -1680,6 +1704,7 @@ def hybrid_search(
     sort: str = _sort_field(),
     since: str = _since_field(),
     include_superseded: bool = _include_superseded_field(),
+    scope: str = _scope_field(),
 ) -> HybridSearchOutput:
     """Find notes by meaning and by words, ranked together (hybrid search).
 
@@ -1703,6 +1728,8 @@ def hybrid_search(
     (frontmatter | filename | file | none). Trust 'file' least.
     "superseded_hidden" counts matching notes left out because they are
     replaced (status superseded) or sync conflict copies.
+    "mentions_hidden" counts notes scope='topic' left out because they only
+    mention the query words in their text; offer scope='all' when it is not 0.
     "all_terms_rank" is set when the note contains every word of the query
     (only if the owner enabled that signal).
     "demoted": the note lies in a folder the owner ranks lower (e.g. mirrored
@@ -1723,7 +1750,7 @@ def hybrid_search(
 
         return hybrid_query(_get_vault(), query, limit=limit, folder=folder,
                             include_restricted=include_restricted, sort=sort, since=since,
-                            include_superseded=include_superseded)
+                            include_superseded=include_superseded, scope=scope)
     except Exception as e:
         raise _to_mcp_error(e)
 

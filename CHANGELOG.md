@@ -22,6 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OBSIDIAN_SEMANTIC_BACKGROUND=0` restores the old behaviour.
 
 ### Added
+- Search: `search_query` and `hybrid_search` take `scope`. `all` (default,
+  as before) returns every match, also notes that only mention the query
+  words in their text. `topic` returns only notes that are about them: every
+  query word is in the note's path, title or tags. Field queries, operators
+  and words shorter than three characters do not count as topic words. Both
+  results report `scope` and `mentions_hidden`, the number of notes `topic`
+  left out; replaced notes among them are counted as `superseded_hidden`
+  only. Reason: with `sort=newest` a fresh working note that merely names a
+  topic came first (seen 2026-11-26: a handover note about the search itself
+  led the list for "DocFlow").
 - Monthly wiki log: when an append creates `wiki/log/YYYY-MM.md` and the
   content brings no frontmatter, the server writes the header itself
   (`uid: note-YYYYMM-wikilog`, title, type, status, tags, created, updated)

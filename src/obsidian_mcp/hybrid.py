@@ -9,12 +9,15 @@ from __future__ import annotations
 import re
 
 from .search_index import (
+    SCOPES,
     SORTS,
     hidden_statuses,
     hide_conflicts,
+    is_about,
     is_conflict_copy,
     is_hidden,
     parse_since,
+    topic_terms,
 )
 
 RRF_K = 60
@@ -235,7 +238,7 @@ def make_snippet(text: str, max_chars: int = 280) -> str:
 def collect(vault, query: str, limit: int = 10, folder: str = "",
             include_restricted: bool = False, cfg=None, candidates: int | None = None,
             all_terms: bool | None = None, since: str = "",
-            include_superseded: bool = False) -> dict:
+            include_superseded: bool = False, scope: str = "all") -> dict:
     """Run the retrievers with the same folder policy; return the raw ranked lists.
 
     {"fulltext": OR full text, "all_terms": AND full text (queries of two or
@@ -245,7 +248,9 @@ def collect(vault, query: str, limit: int = 10, folder: str = "",
     Every hit carries status, typ, date and date_source from the full-text
     index. Replaced notes and sync conflict copies are dropped unless
     ``include_superseded`` (``hidden`` counts them), and so are notes dated
-    before ``since`` (YYYY-MM-DD).
+    before ``since`` (YYYY-MM-DD). ``scope='topic'`` keeps only notes that are
+    about the query words (path, title or tags); ``mentions`` counts the notes
+    that match the words in their text only.
     """
     from .semantic_index import INSTALL_HINT, QDRANT_AVAILABLE, SemanticConfig, normalize_prefix
 
@@ -254,8 +259,12 @@ def collect(vault, query: str, limit: int = 10, folder: str = "",
     folder_prefix = normalize_prefix(folder)
     n = candidates or candidate_count(limit, cfg)
     since_iso = parse_since(since)
+    if scope not in SCOPES:
+        raise ValueError(f"scope must be one of {', '.join(SCOPES)}, got {scope!r}")
+    topic = topic_terms(query) if scope == "topic" else ()
+    ft_stats: dict = {}
     out = {"fulltext": [], "all_terms": [], "semantic": [], "ft_ok": False, "sem_ok": False,
-           "warnings": [], "hidden": 0}
+           "warnings": [], "hidden": 0, "mentions": 0}
     warnings = out["warnings"]
 
     ix = vault._init_index()
@@ -264,12 +273,12 @@ def collect(vault, query: str, limit: int = 10, folder: str = "",
     else:
         try:
             if query.strip():
-                out["fulltext"] = ix.search(query, limit=n, any_term=True,
-                                            folder=folder_prefix, exclude_prefixes=restricted)
+                out["fulltext"] = ix.search(query, limit=n, any_term=True, folder=folder_prefix,
+                                            exclude_prefixes=restricted, topic=topic, stats=ft_stats)
                 want_and = cfg.all_terms_weight > 0 if all_terms is None else all_terms
                 if want_and and len(query.split()) > 1:
-                    out["all_terms"] = ix.search(query, limit=n, any_term=False,
-                                                 folder=folder_prefix, exclude_prefixes=restricted)
+                    out["all_terms"] = ix.search(query, limit=n, any_term=False, folder=folder_prefix,
+                                                 exclude_prefixes=restricted, topic=topic)
             out["ft_ok"] = True
         except Exception as e:  # e.g. unbalanced query syntax
             warnings.append(f"full-text query failed: {e}")
@@ -291,16 +300,23 @@ def collect(vault, query: str, limit: int = 10, folder: str = "",
         except Exception as e:
             sx._mark_down(e)
             warnings.append(f"semantic search failed: {type(e).__name__}: {e}")
-    out["hidden"] = _screen(ix, out, since_iso.date().isoformat() if since_iso else "",
-                            include_superseded)
+    since_day = since_iso.date().isoformat() if since_iso else ""
+    out["hidden"] = _screen(ix, out, since_day, include_superseded, topic)
+    statuses = () if include_superseded else hidden_statuses()
+    conflicts = False if include_superseded else hide_conflicts()
+    out["mentions"] = sum(
+        1 for m in ft_stats.get("mentions", [])
+        if not (since_day and str(m.get("date") or "") < since_day)
+        and not is_hidden(m["path"], m.get("status", ""), statuses, conflicts))
     return out
 
 
-def _screen(ix, lists: dict, since: str, include_superseded: bool) -> int:
+def _screen(ix, lists: dict, since: str, include_superseded: bool, topic: tuple = ()) -> int:
     """Give every hit the index fields and drop what the caller did not ask for.
 
     Semantic hits know only path and text; status and date come from the
-    full-text index. Returns the number of distinct notes dropped as replaced
+    full-text index. With ``topic`` a hit must be about those words (path,
+    title or tags). Returns the number of distinct notes dropped as replaced
     or as conflict copies.
     """
     keys = ("fulltext", "all_terms", "semantic")
@@ -325,6 +341,9 @@ def _screen(ix, lists: dict, since: str, include_superseded: bool) -> int:
             if is_hidden(hit["path"], hit.get("status", ""), statuses, conflicts):
                 hidden.add(hit["path"])
                 continue
+            if topic and not is_about(topic, hit["path"], hit.get("title") or known.get("title", ""),
+                                      hit.get("tags") or known.get("tags", "")):
+                continue
             kept.append(hit)
         lists[key] = kept
     return len(hidden)
@@ -347,8 +366,13 @@ def fuse(lists: dict, limit: int, cfg, candidates: int | None = None) -> list[di
 
 def hybrid_query(vault, query: str, limit: int = 10, folder: str = "",
                  include_restricted: bool = False, sort: str = "relevance",
-                 since: str = "", include_superseded: bool = False) -> dict:
+                 since: str = "", include_superseded: bool = False,
+                 scope: str = "all") -> dict:
     """Run both retrievers with the same folder policy and fuse the results.
+
+    scope='topic': only notes that are about the query words - every word in
+    the path, the title or the tags. 'all' (default) also returns notes that
+    mention them in the text. ``mentions_hidden`` counts what 'topic' left out.
 
     sort='newest': the best matches (the candidate pool of both retrievers,
     fused) ordered by note date, newest first. Relevance still decides which
@@ -364,7 +388,7 @@ def hybrid_query(vault, query: str, limit: int = 10, folder: str = "",
     cfg = SemanticConfig.from_env()
     restricted = () if include_restricted else cfg.restricted
     lists = collect(vault, query, limit, folder, include_restricted, cfg, since=since,
-                    include_superseded=include_superseded)
+                    include_superseded=include_superseded, scope=scope)
     ft_ok, sem_ok, warnings = lists["ft_ok"], lists["sem_ok"], lists["warnings"]
     if not ft_ok and not sem_ok:
         raise RuntimeError("No search backend available: " + "; ".join(warnings))
@@ -391,7 +415,9 @@ def hybrid_query(vault, query: str, limit: int = 10, folder: str = "",
         "warning": "; ".join(warnings),
         "restricted_hidden": bool(restricted),
         "sort": sort,
+        "scope": scope,
         "superseded_hidden": lists["hidden"],
+        "mentions_hidden": lists["mentions"],
         "total": len(results),
         "results": results,
     }

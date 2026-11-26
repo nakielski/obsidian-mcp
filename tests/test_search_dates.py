@@ -190,7 +190,7 @@ class TestIndexSearch:
     def test_meta_lookup(self, vault):
         meta = vault._init_index().meta([CLASH, "gibt/es/nicht.md"])
         assert meta == {CLASH: {"status": "active", "typ": "", "uid": "n2", "title": meta[CLASH]["title"],
-                                "date": "2026-11-03", "date_source": "frontmatter"}}
+                                "tags": "", "date": "2026-11-03", "date_source": "frontmatter"}}
 
 
 class TestOldIndex:
