@@ -45,6 +45,8 @@ Environment:
 | `OBSIDIAN_EMBED_QUERY_PREFIX` / `OBSIDIAN_EMBED_DOC_PREFIX` | empty | Instruction prefixes for models that need them (e.g. E5, Qwen3-Embedding) |
 | `OBSIDIAN_SEARCH_RESTRICTED` | empty | Comma-separated folders hidden from `hybrid_search` and all other search, listing and graph tools unless `include_restricted=true` (still embedded and indexed) |
 | `OBSIDIAN_SEARCH_SECONDARY` | `06 Archive,raw` | Folders holding archived copies and raw records: when several variants of a note match, a copy outside these folders is shown first (nothing is hidden). Set empty to disable |
+| `OBSIDIAN_SEARCH_HIDE_STATUS` | `superseded` | Comma-separated statuses that `search_query` and `hybrid_search` leave out unless the call sets `include_superseded`. Set empty to hide none |
+| `OBSIDIAN_SEARCH_HIDE_CONFLICTS` | `1` | Leave out Syncthing conflict copies (`.sync-conflict-…` in the file name) the same way. `0` shows them |
 | `OBSIDIAN_SEARCH_DEMOTE` | `**/node_modules/` | Comma-separated folders or globs ranked lower in `hybrid_search`, e.g. mirrored third-party docs: `raw/repos/*/*/` (`*` = one folder level, `**` = any depth, a pattern ending in `.md` = one note). Hits stay findable and are marked `demoted`. Setting the variable replaces the default; empty disables |
 | `OBSIDIAN_SEARCH_DEMOTE_WEIGHT` | `0.5` | Score factor for demoted hits (0–1); `0` puts them behind everything else |
 | `OBSIDIAN_HYBRID_CANDIDATES` | `30` | Minimum list length per retriever before fusion (at least 3 × `limit`). Longer lists measured worse: more loose matches found by both retrievers crowd out semantic-only hits |

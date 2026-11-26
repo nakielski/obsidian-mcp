@@ -12,7 +12,7 @@ from mcp.shared.exceptions import McpError
 from mcp.types import ErrorData
 from pydantic import BaseModel, Field
 
-from . import __version__, plugins, policies
+from . import __version__, plugins, policies, search_index
 from .vault import Note, Vault
 
 # ---- Module-level singleton Vault instance ----------------------------
@@ -81,6 +81,38 @@ def _include_restricted_field():
             "Also include folders the vault owner marked as restricted "
             "(OBSIDIAN_SEARCH_RESTRICTED, e.g. a people folder). Only set true when "
             "the user explicitly asked for that content. Default false."
+        ),
+    )
+
+
+def _sort_field():
+    return Field(
+        default="relevance",
+        description=(
+            "'relevance' (default) or 'newest': order the matching notes by note date, "
+            "newest first. Use 'newest' when the user asks for the latest, most recent "
+            "or current notes on a topic."
+        ),
+    )
+
+
+def _since_field():
+    return Field(
+        default="",
+        description=(
+            "Only notes dated on or after this day, as YYYY-MM-DD. Example: '2026-11-01'. "
+            "Default: no limit."
+        ),
+    )
+
+
+def _include_superseded_field():
+    return Field(
+        default=False,
+        description=(
+            "Also return notes that were replaced (status superseded) and sync conflict "
+            "copies. They are left out by default; set true only when the user asks for "
+            "old versions."
         ),
     )
 
@@ -295,10 +327,14 @@ class SearchQueryItem(BaseModel):
     typ: str
     status: str
     uid: str
+    date: str = ""
+    date_source: str = ""
 
 class SearchQueryOutput(BaseModel):
     query: str
     corrected: str
+    sort: str = "relevance"
+    superseded_hidden: int = 0
     total: int
     results: list[SearchQueryItem]
     restricted_hidden: bool = False
@@ -1459,15 +1495,26 @@ def search_query(
         default=20, description="Maximum number of results. Default 20."
     ),
     include_restricted: bool = _include_restricted_field(),
+    sort: str = _sort_field(),
+    since: str = _since_field(),
+    include_superseded: bool = _include_superseded_field(),
 ) -> SearchQueryOutput:
     """Run a ranked, tokenized full-text query against the vault index.
 
     Use this instead of search_notes when you need ranking, multi-word
     matching, boolean logic, field filters, fuzzy matching, or when a plain
     search_notes call returned no results for a multi-word phrase.
+    For "the latest notes on X": query 'X' with sort='newest'.
 
     Returns {"query", "corrected" (did-you-mean, empty string if none),
-    "total", "results": [{path, title, score, tags, folder, typ, status, uid}]}.
+    "sort", "superseded_hidden", "total", "results": [{path, title, score,
+    tags, folder, typ, status, uid, date, date_source}]}.
+    "date" (YYYY-MM-DD) is when the note was last changed: from its
+    frontmatter (updated, datum, date, created), else from a date in the file
+    name, else the file's modification time; "date_source" says which
+    (frontmatter | filename | file | none). Trust 'file' least.
+    "superseded_hidden" counts matching notes left out because they are
+    replaced (status superseded) or sync conflict copies.
 
     Side effects: none (read-only). Requires VAULT_INDEX enabled (default).
     """
@@ -1480,11 +1527,20 @@ def search_query(
                 "Use search_notes for plain substring search."
             )
         hidden = _hidden(include_restricted)
-        results = ix.search(query, limit=limit, exclude_prefixes=hidden)
+        stats: dict = {}
+        results = ix.search(
+            query, limit=limit, exclude_prefixes=hidden, sort=sort,
+            since=search_index.parse_since(since),
+            hide_status=() if include_superseded else search_index.hidden_statuses(),
+            hide_conflict_copies=not include_superseded and search_index.hide_conflicts(),
+            stats=stats,
+        )
         corrected = ix.corrected(query)
         out: dict = {
             "query": query,
             "corrected": corrected,
+            "sort": sort,
+            "superseded_hidden": stats.get("hidden", 0),
             "total": len(results),
             "results": results,
             "restricted_hidden": bool(hidden),
@@ -1573,6 +1629,10 @@ class HybridSearchItem(BaseModel):
     all_terms_rank: int | None = None
     demoted: bool = False
     variants: list[str] = []
+    status: str = ""
+    typ: str = ""
+    date: str = ""
+    date_source: str = ""
 
 
 class HybridSearchOutput(BaseModel):
@@ -1580,6 +1640,8 @@ class HybridSearchOutput(BaseModel):
     mode: str
     warning: str
     restricted_hidden: bool
+    sort: str = "relevance"
+    superseded_hidden: int = 0
     total: int
     results: list[HybridSearchItem]
 
@@ -1615,19 +1677,32 @@ def hybrid_search(
         default=False, description="Also search folders the vault owner marked as restricted "
         "(OBSIDIAN_SEARCH_RESTRICTED). Only set true when the user explicitly asked for that content."
     ),
+    sort: str = _sort_field(),
+    since: str = _since_field(),
+    include_superseded: bool = _include_superseded_field(),
 ) -> HybridSearchOutput:
     """Find notes by meaning and by words, ranked together (hybrid search).
 
     Use this for questions and topics where the exact wording in the notes is
     unknown (synonyms, German/English mix, paraphrases). For exact field
     filters, booleans or phrases use search_query instead.
+    Search for the topic, not for the request: for "the latest notes on X"
+    pass query 'X' with sort='newest' - words like 'latest' or 'notes' in the
+    query only pull in notes that contain those words.
 
     Returns {"query", "mode" ("hybrid" | "fulltext" | "semantic" - fulltext
     means the semantic side was unavailable, see "warning"), "warning",
-    "restricted_hidden" (true if restricted folders were excluded), "total",
+    "restricted_hidden" (true if restricted folders were excluded), "sort",
+    "superseded_hidden", "total",
     "results": [{path, title, heading (best matching section), snippet, uid,
     tags, score, sources, fulltext_rank, semantic_rank, all_terms_rank, demoted,
-    variants}]}.
+    variants, status, typ, date, date_source}]}.
+    "date" (YYYY-MM-DD) is when the note was last changed: from its
+    frontmatter (updated, datum, date, created), else from a date in the file
+    name, else the file's modification time; "date_source" says which
+    (frontmatter | filename | file | none). Trust 'file' least.
+    "superseded_hidden" counts matching notes left out because they are
+    replaced (status superseded) or sync conflict copies.
     "all_terms_rank" is set when the note contains every word of the query
     (only if the owner enabled that signal).
     "demoted": the note lies in a folder the owner ranks lower (e.g. mirrored
@@ -1647,7 +1722,8 @@ def hybrid_search(
         from .hybrid import hybrid_query
 
         return hybrid_query(_get_vault(), query, limit=limit, folder=folder,
-                            include_restricted=include_restricted)
+                            include_restricted=include_restricted, sort=sort, since=since,
+                            include_superseded=include_superseded)
     except Exception as e:
         raise _to_mcp_error(e)
 
