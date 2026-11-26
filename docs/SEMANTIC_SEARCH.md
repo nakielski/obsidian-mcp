@@ -185,7 +185,7 @@ taken over from the dump.
 
 | Tool | Description |
 |---|---|
-| `hybrid_search(query, limit?, folder?, include_restricted?)` | Notes ranked by full text + meaning; each hit names the best-matching section, a snippet and which retriever found it |
+| `hybrid_search(query, limit?, folder?, include_restricted?, sort?, since?, include_superseded?, scope?)` | Notes ranked by full text + meaning; each hit names the best-matching section, a snippet and which retriever found it. `scope='topic'` keeps only notes with every query word in their path, title or tags; `mentions_hidden` counts the notes that only mention the words |
 | `semantic_sync(max_seconds?, status_only?)` | Catch up pending or out-of-band changes within a time budget; reports collection status |
 
 `search_notes`, `search_query`, `rebuild_index` and `index_status` are

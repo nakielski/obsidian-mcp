@@ -56,6 +56,9 @@ _CONFLICT_RE = re.compile(r"\.sync-conflict-", re.IGNORECASE)
 DATE_KEYS = ("updated", "datum", "date", "created")
 EPOCH = datetime.datetime(1970, 1, 1)
 SORTS = ("relevance", "newest")
+SCOPES = ("all", "topic")
+_OPERATORS = {"and", "or", "not", "to"}
+_WORD_RE = re.compile(r"[\w][\w-]*", re.UNICODE)
 
 
 def _as_datetime(value) -> datetime.datetime | None:
@@ -144,6 +147,37 @@ def is_hidden(path: str, status: str, statuses: tuple[str, ...] | None = None,
     statuses = hidden_statuses() if statuses is None else statuses
     conflicts = hide_conflicts() if conflicts is None else conflicts
     return (str(status or "").lower() in statuses) or bool(conflicts and is_conflict_copy(path))
+
+
+def topic_terms(query: str) -> tuple[str, ...]:
+    """The words of a query that name its topic, casefolded.
+
+    Field queries ('status:active'), operators and words shorter than three
+    characters carry no topic and are left out.
+    """
+    terms: list[str] = []
+    for part in (query or "").split():
+        if ":" in part:
+            continue
+        for word in _WORD_RE.findall(part):
+            word = word.strip("-_").casefold()
+            if len(word) >= 3 and word not in _OPERATORS and word not in terms:
+                terms.append(word)
+    return tuple(terms)
+
+
+def is_about(terms, path: str, title: str = "", tags="") -> bool:
+    """True when every topic word is in the note's path, title or tags.
+
+    A note that only mentions the topic in its text is not about it.
+    No terms: nothing to test, every note passes.
+    """
+    if not terms:
+        return True
+    if not isinstance(tags, str):
+        tags = ",".join(tags or [])
+    hay = f"{path}\n{title}\n{tags}".casefold()
+    return all(t in hay for t in terms)
 
 
 def parse_since(value: str) -> datetime.datetime | None:
@@ -312,7 +346,7 @@ class VaultIndex:
                any_term: bool = False, folder: str = "", exclude_prefixes=(),
                sort: str = "relevance", since: datetime.datetime | None = None,
                hide_status: tuple[str, ...] = (), hide_conflict_copies: bool = False,
-               stats: dict | None = None) -> list[dict]:
+               topic: tuple[str, ...] = (), stats: dict | None = None) -> list[dict]:
         """Run a query string. Plain terms search title+body; field queries,
         booleans, phrases, wildcards, fuzzy and ranges per Whoosh syntax.
 
@@ -325,6 +359,9 @@ class VaultIndex:
         hide_status / hide_conflict_copies: leave out notes with one of these
             statuses and Syncthing conflict copies; ``stats['hidden']`` counts
             the matching notes left out for that reason.
+        topic: only notes that are about these words (``is_about``: path, title
+            or tags). ``stats['mentions']`` lists the matching notes left out
+            because they only mention the words: [{path, status, date}].
         """
         if sort not in SORTS:
             raise ValueError(f"sort must be one of {', '.join(SORTS)}, got {sort!r}")
@@ -337,7 +374,9 @@ class VaultIndex:
         excluded = tuple(p.casefold() for p in exclude_prefixes)
         hide_status = tuple(x.lower() for x in hide_status)
         hiding = bool(hide_status or hide_conflict_copies)
-        filtered = bool(folder_cf or excluded or hiding or since)
+        topic = tuple(topic or ())
+        filtered = bool(folder_cf or excluded or hiding or since or topic)
+        mentions: list[dict] = []
 
         def allowed(path: str) -> bool:
             p = path.casefold()
@@ -363,10 +402,14 @@ class VaultIndex:
                                         hide_conflict_copies):
                     hidden += 1
                     continue
+                if topic and not is_about(topic, hit["path"], hit.get("title", ""), hit.get("tags", "")):
+                    mentions.append({"path": hit["path"], "status": hit.get("status", "") or "",
+                                     "date": _iso(dated)})
+                    continue
                 if len(out) >= limit:
-                    if not hiding:
+                    if not (hiding or topic):
                         break
-                    continue  # keep counting what is hidden
+                    continue  # keep counting what is hidden or off topic
                 score = hit.score if isinstance(hit.score, (int, float)) and not newest else 0.0
                 out.append({
                     "path": hit["path"],
@@ -383,10 +426,11 @@ class VaultIndex:
                 })
         if stats is not None:
             stats["hidden"] = hidden
+            stats["mentions"] = mentions
         return out
 
     def meta(self, paths) -> dict[str, dict]:
-        """Stored fields for the given paths: {path: {status, typ, uid, title, date, date_source}}.
+        """Stored fields for the given paths: {path: {status, typ, uid, title, tags, date, date_source}}.
 
         For hits that come from another retriever (semantic vectors) and
         carry no frontmatter fields. Unknown paths are left out.
@@ -402,6 +446,7 @@ class VaultIndex:
                     "typ": doc.get("typ", "") or "",
                     "uid": doc.get("uid", "") or "",
                     "title": doc.get("title", "") or "",
+                    "tags": doc.get("tags", "") or "",
                     "date": _iso(doc.get("mtime")),
                     "date_source": doc.get("date_src", "") or "",
                 }
